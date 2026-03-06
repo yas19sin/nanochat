@@ -5,10 +5,12 @@ In the style of GPT-4 tokenizer.
 import os
 import time
 import argparse
+import random
 import torch
+import pyarrow.parquet as pq
 from nanochat.tokenizer import RustBPETokenizer
 from nanochat.common import get_base_dir
-from nanochat.dataset import parquets_iter_batched
+from nanochat.dataset import parquets_iter_batched, list_parquet_files
 
 # -----------------------------------------------------------------------------
 # Parse command line arguments
@@ -25,22 +27,75 @@ print(f"vocab_size: {args.vocab_size:,}")
 # -----------------------------------------------------------------------------
 # Text iterator
 
+SUBSET_WEIGHTS = {
+    # Slightly oversample pure Darija to bias the tokenizer toward the target distribution
+    "pure": 1.3,
+    "bilingual": 1.0,
+    "arabic_raw": 0.9,
+    "other": 1.0,
+}
+SUBSET_PREFIXES = ("arabic_raw", "bilingual", "pure")
+
+
+def iter_docs(parquet_paths):
+    for filepath in parquet_paths:
+        pf = pq.ParquetFile(filepath)
+        for rg_idx in range(pf.num_row_groups):
+            rg = pf.read_row_group(rg_idx)
+            for doc in rg.column("text").to_pylist():
+                yield doc
+
+
+def build_subset_iters():
+    # Ignore the last file (reserved for validation)
+    parquet_paths = list_parquet_files()
+    train_paths = parquet_paths[:-1] if len(parquet_paths) > 1 else parquet_paths
+    grouped = {"other": []}
+    for path in train_paths:
+        name = os.path.basename(path)
+        matched = False
+        for prefix in SUBSET_PREFIXES:
+            if name.startswith(prefix):
+                grouped.setdefault(prefix, []).append(path)
+                matched = True
+                break
+        if not matched:
+            grouped["other"].append(path)
+    return {subset: iter_docs(paths) for subset, paths in grouped.items() if paths}
+
+
 def text_iterator():
     """
-    1) Flatten the batches into a single iterator
+    1) Draw documents from subset iterators with weighted sampling
     2) Crop every document to args.doc_cap characters
     3) Break when we've seen args.max_chars characters
     """
+    rng = random.Random(42)
     nchars = 0
-    for batch in parquets_iter_batched(split="train"):
-        for doc in batch:
-            doc_text = doc
-            if len(doc_text) > args.doc_cap:
-                doc_text = doc_text[:args.doc_cap]
-            nchars += len(doc_text)
-            yield doc_text
-            if nchars > args.max_chars:
-                return
+    subset_iters = build_subset_iters()
+    active_subsets = list(subset_iters.keys())
+
+    if not active_subsets:
+        raise RuntimeError("No training parquet files found. Did you run scripts.darija_data_prep?")
+
+    weight_msg = ", ".join([f"{s} (w={SUBSET_WEIGHTS.get(s, 1.0)})" for s in active_subsets])
+    print(f"Sampling tokenizer data from: {weight_msg}")
+
+    while active_subsets:
+        weights = [SUBSET_WEIGHTS.get(s, 1.0) for s in active_subsets]
+        subset = rng.choices(active_subsets, weights=weights, k=1)[0]
+        try:
+            doc_text = next(subset_iters[subset])
+        except StopIteration:
+            active_subsets.remove(subset)
+            continue
+
+        if len(doc_text) > args.doc_cap:
+            doc_text = doc_text[:args.doc_cap]
+        nchars += len(doc_text)
+        yield doc_text
+        if nchars > args.max_chars:
+            return
 text_iter = text_iterator()
 
 # -----------------------------------------------------------------------------

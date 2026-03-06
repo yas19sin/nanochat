@@ -19,12 +19,14 @@ from nanochat.common import get_base_dir
 # -----------------------------------------------------------------------------
 # The specifics of the current pretraining dataset
 
-# The URL on the internet where the data is hosted and downloaded from on demand
-BASE_URL = "https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle/resolve/main"
-MAX_SHARD = 6542 # the last datashard is shard_06542.parquet
+# Default to the Darija pretraining dataset location, but keep support for the
+# original ClimbMix shards as a legacy fallback.
+CLIMBMIX_BASE_URL = "https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle/resolve/main"
+CLIMBMIX_MAX_SHARD = 6542 # the last datashard is shard_06542.parquet
 index_to_filename = lambda index: f"shard_{index:05d}.parquet" # format of the filenames
 base_dir = get_base_dir()
-DATA_DIR = os.path.join(base_dir, "base_data_climbmix")
+DATA_DIR = os.environ.get("NANOCHAT_DATA_DIR", os.path.join(base_dir, "darija_data"))
+LEGACY_DATA_DIR = os.path.join(base_dir, "base_data_climbmix")
 
 # -----------------------------------------------------------------------------
 # These functions are useful utilities to other modules, can/should be imported
@@ -36,26 +38,26 @@ def list_parquet_files(data_dir=None, warn_on_legacy=False):
     # Legacy-supporting code due to the upgrade from FinewebEdu-100B to ClimbMix-400B
     # This code will eventually be deleted.
     if not os.path.exists(data_dir):
-        if warn_on_legacy:
+        legacy_data_dir = LEGACY_DATA_DIR
+        if warn_on_legacy and os.path.exists(legacy_data_dir):
             print()
             print("=" * 80)
-            print("  WARNING: DATASET UPGRADE REQUIRED")
+            print("  WARNING: DATASET LOCATION CHANGED")
             print("=" * 80)
             print()
             print(f"  Could not find: {data_dir}")
             print()
-            print("  nanochat recently switched from FinewebEdu-100B to ClimbMix-400B.")
-            print("  Everyone who does `git pull` as of March 4, 2026 is expected to see this message.")
-            print("  To upgrade to the new ClimbMix-400B dataset, run these two commands:")
-            print()
-            print("    python -m nanochat.dataset -n 170     # download ~170 shards, enough for GPT-2, adjust as desired")
-            print("    python -m scripts.tok_train           # re-train tokenizer on new ClimbMix data")
-            print()
-            print("  For now, falling back to your old FinewebEdu-100B dataset...")
+            print("  nanochat now defaults to a local Darija dataset in:")
+            print(f"    {DATA_DIR}")
+            print("  To prepare it, run:")
+            print("    python -m scripts.darija_data_prep")
+            print("  Falling back to the legacy ClimbMix shards if present...")
             print("=" * 80)
             print()
         # attempt a fallback to the legacy data directory
-        data_dir = os.path.join(base_dir, "base_data")
+        data_dir = legacy_data_dir
+        if not os.path.exists(data_dir):
+            raise FileNotFoundError(f"No parquet directory found at {DATA_DIR} (preferred) or {LEGACY_DATA_DIR} (legacy).")
 
     parquet_files = sorted([
         f for f in os.listdir(data_dir)
@@ -64,14 +66,14 @@ def list_parquet_files(data_dir=None, warn_on_legacy=False):
     parquet_paths = [os.path.join(data_dir, f) for f in parquet_files]
     return parquet_paths
 
-def parquets_iter_batched(split, start=0, step=1):
+def parquets_iter_batched(split, start=0, step=1, data_dir=None):
     """
     Iterate through the dataset, in batches of underlying row_groups for efficiency.
     - split can be "train" or "val". the last parquet file will be val.
     - start/step are useful for skipping rows in DDP. e.g. start=rank, step=world_size
     """
     assert split in ["train", "val"], "split must be 'train' or 'val'"
-    parquet_paths = list_parquet_files()
+    parquet_paths = list_parquet_files(data_dir=data_dir)
     parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
     for filepath in parquet_paths:
         pf = pq.ParquetFile(filepath)
@@ -86,13 +88,13 @@ def download_single_file(index):
 
     # Construct the local filepath for this file and skip if it already exists
     filename = index_to_filename(index)
-    filepath = os.path.join(DATA_DIR, filename)
+    filepath = os.path.join(LEGACY_DATA_DIR, filename)
     if os.path.exists(filepath):
         print(f"Skipping {filepath} (already exists)")
         return True
 
     # Construct the remote URL for this file
-    url = f"{BASE_URL}/{filename}"
+    url = f"{CLIMBMIX_BASE_URL}/{filename}"
     print(f"Downloading {filename}...")
 
     # Download with retries
@@ -140,13 +142,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Prepare the output directory
-    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(LEGACY_DATA_DIR, exist_ok=True)
 
     # The way this works is that the user specifies the number of train shards to download via the -n flag.
     # In addition to that, the validation shard is *always* downloaded and is pinned to be the last shard.
-    num_train_shards = MAX_SHARD if args.num_files == -1 else min(args.num_files, MAX_SHARD)
+    num_train_shards = CLIMBMIX_MAX_SHARD if args.num_files == -1 else min(args.num_files, CLIMBMIX_MAX_SHARD)
     ids_to_download = list(range(num_train_shards))
-    ids_to_download.append(MAX_SHARD) # always download the validation shard
+    ids_to_download.append(CLIMBMIX_MAX_SHARD) # always download the validation shard
 
     # Download the shards
     print(f"Downloading {len(ids_to_download)} shards using {args.num_workers} workers...")

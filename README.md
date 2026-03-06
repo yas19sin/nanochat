@@ -54,6 +54,14 @@ A few more notes:
 - If your GPU(s) have less than 80GB, you'll have to tune some of the hyperparameters or you will OOM / run out of VRAM. Look for `--device_batch_size` in the scripts and reduce it until things fit. E.g. from 32 (default) to 16, 8, 4, 2, or even 1. Less than that you'll have to know a bit more what you're doing and get more creative.
 - Most of the code is fairly vanilla PyTorch so it should run on anything that supports that - xpu, mps, or etc, but I haven't personally exercised all of these code paths so there might be sharp edges.
 
+### Darija Nanochat pipeline
+
+To train a Moroccan Darija model end-to-end:
+
+- Prepare the HuggingFace corpus as local parquets (single `text` column, last shard held out for validation): `python -m scripts.darija_data_prep --data-dir $NANOCHAT_BASE_DIR/darija_data`
+- Run the Darija speedrun (custom tokenizer + Darija SFT mix): `bash runs/darija.sh`
+- `NANOCHAT_DATA_DIR` defaults to `$NANOCHAT_BASE_DIR/darija_data`; override it if your parquet shards live elsewhere.
+
 ## Research
 
 If you are a researcher and wish to help improve nanochat, two scripts of interest are [runs/scaling_laws.sh](runs/scaling_laws.sh) and [runs/miniseries.sh](runs/miniseries.sh). See [Jan 7 miniseries v1](https://github.com/karpathy/nanochat/discussions/420) for related documentation. For quick experimentation (~5 min pretraining runs) my favorite scale is to train a 12-layer model (GPT-1 sized), e.g. like this:
@@ -143,6 +151,7 @@ I've published a number of guides that might contain helpful information, most r
 ├── pyproject.toml
 ├── runs
 │   ├── miniseries.sh               # Miniseries training script
+│   ├── darija.sh                   # Darija end-to-end pipeline
 │   ├── runcpu.sh                   # Small example of how to run on CPU/MPS
 │   ├── scaling_laws.sh             # Scaling laws experiments
 │   └── speedrun.sh                 # Train the ~$100 nanochat d20
@@ -154,12 +163,14 @@ I've published a number of guides that might contain helpful information, most r
 │   ├── chat_rl.py                  # Chat model: reinforcement learning
 │   ├── chat_sft.py                 # Chat model: train SFT
 │   ├── chat_web.py                 # Chat model: talk to over WebUI
+│   ├── darija_data_prep.py         # Convert Darija HF corpus to parquet shards
 │   ├── tok_eval.py                 # Tokenizer: evaluate compression rate
 │   └── tok_train.py                # Tokenizer: train it
 ├── tasks
 │   ├── arc.py                      # Multiple choice science questions
 │   ├── common.py                   # TaskMixture | TaskSequence
 │   ├── customjson.py               # Make Task from arbitrary jsonl convos
+│   ├── darija_instruct.py          # Darija instruction datasets for SFT
 │   ├── gsm8k.py                    # 8K Grade School Math questions
 │   ├── humaneval.py                # Misnomer; Simple Python coding task
 │   ├── mmlu.py                     # Multiple choice questions, broad topics
