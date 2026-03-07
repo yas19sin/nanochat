@@ -215,11 +215,8 @@ class NanochatModel(NanochatPreTrainedModel):
             {str(i): nn.Embedding(padded_vocab_size, kv_dim)
              for i in range(config.n_layer) if has_ve(i, config.n_layer)}
         )
-        self.rotary_seq_len = config.sequence_len * 10
-        cos, sin = self._precompute_rotary_embeddings(
-            self.rotary_seq_len, config.head_dim)
-        self.register_buffer("cos", cos, persistent=False)
-        self.register_buffer("sin", sin, persistent=False)
+        self._rope_cos: Optional[torch.Tensor] = None
+        self._rope_sin: Optional[torch.Tensor] = None
 
     def _precompute_rotary_embeddings(
         self,
@@ -276,14 +273,18 @@ class NanochatModel(NanochatPreTrainedModel):
         if past_key_values is not None and len(past_key_values) > 0:
             past_len = past_key_values[0][0].size(-2)
         end = past_len + seq_len
-        if end > self.cos.size(1):
-            cos, sin = self._precompute_rotary_embeddings(
-                end * 2, self.config.head_dim, device=input_ids.device)
-            self.cos = cos
-            self.sin = sin
-        cos = self.cos[:, past_len:end].to(
+        need_recompute = (
+            self._rope_cos is None
+            or self._rope_cos.device.type == "meta"
+            or end > self._rope_cos.size(1)
+        )
+        if need_recompute:
+            rope_len = max(end * 2, self.config.sequence_len * 10)
+            self._rope_cos, self._rope_sin = self._precompute_rotary_embeddings(
+                rope_len, self.config.head_dim, device=input_ids.device)
+        cos = self._rope_cos[:, past_len:end].to(
             dtype=self.transformer["wte"].weight.dtype, device=input_ids.device)
-        sin = self.sin[:, past_len:end].to(
+        sin = self._rope_sin[:, past_len:end].to(
             dtype=self.transformer["wte"].weight.dtype, device=input_ids.device)
 
         hidden_states = self.transformer["wte"](input_ids)
