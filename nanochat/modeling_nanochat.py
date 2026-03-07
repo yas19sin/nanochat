@@ -431,7 +431,12 @@ class NanochatForCausalLM(NanochatPreTrainedModel, GenerationMixin):
     ):
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids, dtype=torch.long)
-        if past_key_values:
+        has_past = (
+            past_key_values is not None
+            and hasattr(past_key_values, "get_seq_length")
+            and past_key_values.get_seq_length() > 0
+        )
+        if has_past:
             input_ids = input_ids[:, -1:]
         return {
             "input_ids": input_ids,
