@@ -41,6 +41,10 @@ class NanochatConfig(PretrainedConfig):
         )
 
     @property
+    def num_hidden_layers(self):
+        return self.n_layer
+
+    @property
     def head_dim(self):
         return self.n_embd // self.n_head
 

@@ -5,7 +5,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import PreTrainedModel
+from transformers import DynamicCache, PreTrainedModel
 from transformers.generation.utils import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 
@@ -269,6 +269,18 @@ class NanochatModel(NanochatPreTrainedModel):
         return_dict = self.config.use_return_dict if return_dict is None else return_dict
         batch_size, seq_len = input_ids.shape
 
+        # Convert DynamicCache to tuple-of-tuples for internal use
+        _input_was_dynamic_cache = isinstance(past_key_values, DynamicCache)
+        if _input_was_dynamic_cache:
+            if past_key_values.get_seq_length() == 0:
+                past_key_values = None
+            else:
+                past_key_values = tuple(
+                    (past_key_values.key_cache[i],
+                     past_key_values.value_cache[i])
+                    for i in range(len(past_key_values.key_cache))
+                )
+
         past_len = 0
         if past_key_values is not None and len(past_key_values) > 0:
             past_len = past_key_values[0][0].size(-2)
@@ -319,6 +331,13 @@ class NanochatModel(NanochatPreTrainedModel):
         hidden_states = norm(hidden_states)
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
+
+        # Convert presents back to DynamicCache if that's what was passed in
+        if _input_was_dynamic_cache and presents is not None:
+            cache = DynamicCache()
+            for layer_idx, (k, v) in enumerate(presents):
+                cache.update(k, v, layer_idx)
+            presents = cache
 
         if not return_dict:
             outputs = (hidden_states, presents, all_hidden_states)
