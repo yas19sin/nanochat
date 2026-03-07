@@ -86,15 +86,15 @@ def check_logits(hf_dir: str):
     print("=" * 60)
 
     tok = AutoTokenizer.from_pretrained(hf_dir, trust_remote_code=True)
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
     model = AutoModelForCausalLM.from_pretrained(
-        hf_dir, trust_remote_code=True, torch_dtype=torch.bfloat16,
-        device_map="auto",
-    )
+        hf_dir, trust_remote_code=True, dtype=torch.bfloat16,
+    ).to(device)
     model.eval()
 
     text = "شنو هي الدارجة المغربية؟"
     inputs = tok(text, return_tensors="pt")
-    inputs = {k: v.to(model.device) for k, v in inputs.items()
+    inputs = {k: v.to(device) for k, v in inputs.items()
               if k in {"input_ids", "attention_mask"}}
 
     with torch.no_grad():
@@ -135,10 +135,10 @@ def check_mc_loglikelihoods(hf_dir: str):
     print("=" * 60)
 
     tok = AutoTokenizer.from_pretrained(hf_dir, trust_remote_code=True)
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
     model = AutoModelForCausalLM.from_pretrained(
-        hf_dir, trust_remote_code=True, torch_dtype=torch.bfloat16,
-        device_map="auto",
-    )
+        hf_dir, trust_remote_code=True, dtype=torch.bfloat16,
+    ).to(device)
     model.eval()
 
     # Simple MC question where we know the right answer
@@ -156,7 +156,7 @@ def check_mc_loglikelihoods(hf_dir: str):
         q_ids = tok.encode(question, add_special_tokens=False)
         answer_start = len(q_ids)
 
-        input_ids = torch.tensor([ids], device=model.device)
+        input_ids = torch.tensor([ids], device=device)
         with torch.no_grad():
             logits = model(input_ids=input_ids).logits[0]  # (seq_len, vocab)
         # Log-likelihood of the answer tokens
@@ -185,7 +185,7 @@ def check_weight_stats(hf_dir: str):
     print("=" * 60)
 
     model = AutoModelForCausalLM.from_pretrained(
-        hf_dir, trust_remote_code=True, torch_dtype=torch.bfloat16,
+        hf_dir, trust_remote_code=True, dtype=torch.bfloat16,
     )
 
     for name, param in model.named_parameters():
