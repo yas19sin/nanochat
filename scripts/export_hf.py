@@ -6,9 +6,8 @@ import shutil
 from pathlib import Path
 
 import torch
-from tokenizers import AddedToken, Regex, Tokenizer, decoders, pre_tokenizers, processors
-from tokenizers.models import BPE
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerFast
+from transformers.integrations.tiktoken import convert_tiktoken_to_fast
 from nanochat.configuration_nanochat import NanochatConfig
 from nanochat.modeling_nanochat import NanochatForCausalLM
 
@@ -23,20 +22,6 @@ SPECIAL_TOKENS = [
     "<|output_start|>",
     "<|output_end|>",
 ]
-SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
-
-
-def bytes_to_unicode() -> dict[int, str]:
-    bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"),
-                                                          ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
-    cs = bs[:]
-    extra = 0
-    for byte in range(256):
-        if byte not in bs:
-            bs.append(byte)
-            cs.append(256 + extra)
-            extra += 1
-    return dict(zip(bs, [chr(codepoint) for codepoint in cs]))
 
 
 def resolve_checkpoint_dir(source: str, model_tag: str | None) -> Path:
@@ -69,52 +54,13 @@ def remap_state_dict_for_hf(state_dict: dict[str, torch.Tensor]) -> dict[str, to
     return remapped
 
 
-def convert_mergeable_ranks_to_hf(mergeable_ranks: dict[bytes, int]) -> tuple[dict[str, int], list[tuple[str, str]]]:
-    byte_encoder = bytes_to_unicode()
-
-    def token_bytes_to_string(token_bytes: bytes) -> str:
-        return "".join(byte_encoder[b] for b in token_bytes)
-
-    vocab = {}
-    merges = []
-    for token_bytes, rank in mergeable_ranks.items():
-        vocab[token_bytes_to_string(token_bytes)] = rank
-        if len(token_bytes) == 1:
-            continue
-        local_merges = []
-        for split_idx in range(1, len(token_bytes)):
-            left = token_bytes[:split_idx]
-            right = token_bytes[split_idx:]
-            if left in mergeable_ranks and right in mergeable_ranks:
-                local_merges.append((left, right, rank))
-        local_merges.sort(key=lambda item: (
-            mergeable_ranks[item[0]], mergeable_ranks[item[1]]))
-        merges.extend(local_merges)
-    merges.sort(key=lambda item: item[2])
-    merges = [(token_bytes_to_string(left), token_bytes_to_string(right))
-              for left, right, _ in merges]
-    return vocab, merges
-
-
 def export_tokenizer(tokenizer_dir: Path, output_dir: Path, bos_token: str, eos_token: str | None, pad_token: str) -> None:
     with open(tokenizer_dir / "tokenizer.pkl", "rb") as handle:
         encoding = pickle.load(handle)
 
-    vocab, merges = convert_mergeable_ranks_to_hf(encoding._mergeable_ranks)
-    tokenizer = Tokenizer(BPE(vocab, merges, fuse_unk=False))
-    tokenizer.pre_tokenizer = pre_tokenizers.Sequence(
-        [
-            pre_tokenizers.Split(Regex(SPLIT_PATTERN),
-                                 behavior="isolated", invert=False),
-            pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False),
-        ]
-    )
-    tokenizer.decoder = decoders.ByteLevel()
-    tokenizer.post_processor = processors.ByteLevel(trim_offsets=False)
-    tokenizer.add_special_tokens(
-        [AddedToken(token, normalized=False, special=True) for token in SPECIAL_TOKENS])
+    convert_tiktoken_to_fast(encoding, str(output_dir))
+
     tokenizer_path = output_dir / "tokenizer.json"
-    tokenizer.save(str(tokenizer_path))
 
     additional_special_tokens = [token for token in SPECIAL_TOKENS if token not in {
         bos_token, eos_token, pad_token}]
