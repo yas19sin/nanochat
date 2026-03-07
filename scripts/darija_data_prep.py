@@ -7,6 +7,7 @@ writes local parquet shards that the standard nanochat dataloader can consume.
 Usage (no GPU / no torch required):
     pip install datasets pyarrow   # only deps needed
     python -m scripts.darija_data_prep
+    python -m scripts.darija_data_prep --no-streaming --cache-dir /workspace/hf_cache
 
 The output directory defaults to $NANOCHAT_DATA_DIR (or ~/.cache/nanochat/darija_data).
 Train shards are written first, then a single validation shard is written *last*
@@ -52,6 +53,10 @@ def main():
                         help="rows per train parquet shard")
     parser.add_argument("--output-dir", type=str, default=None,
                         help="override output directory")
+    parser.add_argument("--no-streaming", action="store_true",
+                        help="download subsets locally first, then shard from disk")
+    parser.add_argument("--cache-dir", type=str, default=None,
+                        help="optional HuggingFace datasets cache directory")
     args = parser.parse_args()
 
     output_dir = args.output_dir or get_output_dir()
@@ -67,8 +72,15 @@ def main():
     total_train = 0
 
     for subset in SUBSETS:
-        print(f"\n--- Streaming subset: {subset} ---")
-        ds = load_dataset(HF_DATASET, subset, split="train", streaming=True)
+        mode = "local" if args.no_streaming else "streaming"
+        print(f"\n--- Loading subset: {subset} ({mode}) ---")
+        ds = load_dataset(
+            HF_DATASET,
+            subset,
+            split="train",
+            streaming=not args.no_streaming,
+            cache_dir=args.cache_dir,
+        )
         for row in ds:
             text = row.get("text", "")
             if not text:
@@ -112,6 +124,8 @@ def main():
     print(f"\nDone! {total_train:,} train rows across {shard_idx} shards, "
           f"{len(val_rows):,} val rows.")
     print(f"Data directory: {output_dir}")
+    if args.no_streaming:
+        print("HF subsets were loaded via local cache/download, not live streaming.")
 
 
 def _write_shard(output_dir, subset, idx, rows, row_group_size):
