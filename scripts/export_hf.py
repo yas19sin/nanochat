@@ -59,6 +59,16 @@ def strip_compile_prefix(state_dict: dict[str, torch.Tensor]) -> dict[str, torch
     return {key.removeprefix("_orig_mod."): value for key, value in state_dict.items()}
 
 
+def remap_state_dict_for_hf(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    remapped = {}
+    for key, value in state_dict.items():
+        if key == "lm_head.weight":
+            remapped[key] = value
+        else:
+            remapped[f"model.{key}"] = value
+    return remapped
+
+
 def convert_mergeable_ranks_to_hf(mergeable_ranks: dict[bytes, int]) -> tuple[dict[str, int], list[tuple[str, str]]]:
     byte_encoder = bytes_to_unicode()
 
@@ -213,6 +223,7 @@ def main() -> None:
             "bfloat16": torch.bfloat16,
         }[args.dtype]
     model = model.to(dtype=source_dtype)
+    model_data = remap_state_dict_for_hf(model_data)
     missing_keys, unexpected_keys = model.load_state_dict(
         model_data, strict=False)
     if missing_keys or unexpected_keys:
