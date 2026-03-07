@@ -249,6 +249,8 @@ def main() -> None:
     model = AutoModelForCausalLM.from_pretrained(
         args.output_dir, trust_remote_code=True)
     sample = tokenizer("شنو هي الدارجة المغربية؟", return_tensors="pt")
+    sample = {key: value for key, value in sample.items() if key in {
+        "input_ids", "attention_mask"}}
     with torch.no_grad():
         outputs = model(**sample)
     print(f"Export validated. Logits shape: {tuple(outputs.logits.shape)}")

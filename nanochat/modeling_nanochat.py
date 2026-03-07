@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PreTrainedModel
-from transformers.generation import GenerationMixin
+from transformers.generation.utils import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 
 try:
@@ -261,9 +261,11 @@ class NanochatModel(NanochatPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[Tuple[Tuple[torch.Tensor,
                                               torch.Tensor], ...]] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        **kwargs,
     ):
         use_cache = self.config.use_cache if use_cache is None else use_cache
         output_hidden_states = self.config.output_hidden_states if output_hidden_states is None else output_hidden_states
@@ -355,19 +357,23 @@ class NanochatForCausalLM(NanochatPreTrainedModel, GenerationMixin):
         attention_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[Tuple[Tuple[torch.Tensor,
                                               torch.Tensor], ...]] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        **kwargs,
     ):
         return_dict = self.config.use_return_dict if return_dict is None else return_dict
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
+            token_type_ids=token_type_ids,
             use_cache=use_cache,
             output_hidden_states=output_hidden_states,
             return_dict=True,
+            **kwargs,
         )
         logits = self.lm_head(
             outputs.last_hidden_state)[..., : self.config.vocab_size]
