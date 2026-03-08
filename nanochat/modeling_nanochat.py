@@ -19,6 +19,42 @@ def norm(x: torch.Tensor) -> torch.Tensor:
     return F.rms_norm(x, (x.size(-1),))
 
 
+def dynamic_cache_to_legacy(past_key_values: DynamicCache):
+    if hasattr(past_key_values, "to_legacy_cache"):
+        return past_key_values.to_legacy_cache()
+
+    if hasattr(past_key_values, "layers"):
+        legacy_cache = []
+        for layer in past_key_values.layers:
+            keys = getattr(layer, "keys", None)
+            values = getattr(layer, "values", None)
+            if keys is None or values is None:
+                continue
+            if keys.numel() == 0 or values.numel() == 0:
+                continue
+            legacy_cache.append((keys, values))
+        return tuple(legacy_cache)
+
+    n_layers = len(past_key_values)
+    if hasattr(past_key_values, "key_cache"):
+        return tuple(
+            (past_key_values.key_cache[i], past_key_values.value_cache[i])
+            for i in range(n_layers)
+        )
+
+    return tuple(past_key_values[i] for i in range(n_layers))
+
+
+def legacy_cache_to_dynamic(past_key_values):
+    if hasattr(DynamicCache, "from_legacy_cache"):
+        return DynamicCache.from_legacy_cache(past_key_values)
+
+    cache = DynamicCache()
+    for layer_idx, (k, v) in enumerate(past_key_values):
+        cache.update(k, v, layer_idx)
+    return cache
+
+
 class Linear(nn.Linear):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.linear(x, self.weight.to(dtype=x.dtype))
@@ -275,17 +311,7 @@ class NanochatModel(NanochatPreTrainedModel):
             if past_key_values.get_seq_length() == 0:
                 past_key_values = None
             else:
-                n_layers = len(past_key_values)
-                if hasattr(past_key_values, 'key_cache'):
-                    past_key_values = tuple(
-                        (past_key_values.key_cache[i],
-                         past_key_values.value_cache[i])
-                        for i in range(n_layers)
-                    )
-                else:
-                    past_key_values = tuple(
-                        past_key_values[i] for i in range(n_layers)
-                    )
+                past_key_values = dynamic_cache_to_legacy(past_key_values)
 
         past_len = 0
         if past_key_values is not None and len(past_key_values) > 0:
@@ -340,10 +366,7 @@ class NanochatModel(NanochatPreTrainedModel):
 
         # Convert presents back to DynamicCache if that's what was passed in
         if _input_was_dynamic_cache and presents is not None:
-            cache = DynamicCache()
-            for layer_idx, (k, v) in enumerate(presents):
-                cache.update(k, v, layer_idx)
-            presents = cache
+            presents = legacy_cache_to_dynamic(presents)
 
         if not return_dict:
             outputs = (hidden_states, presents, all_hidden_states)
