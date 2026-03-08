@@ -276,7 +276,8 @@ class NanochatModel(NanochatPreTrainedModel):
                 past_key_values = None
             else:
                 past_key_values = tuple(
-                    past_key_values[i]
+                    (past_key_values.key_cache[i],
+                     past_key_values.value_cache[i])
                     for i in range(len(past_key_values))
                 )
 
