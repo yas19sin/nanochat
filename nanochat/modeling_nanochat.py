@@ -275,11 +275,17 @@ class NanochatModel(NanochatPreTrainedModel):
             if past_key_values.get_seq_length() == 0:
                 past_key_values = None
             else:
-                past_key_values = tuple(
-                    (past_key_values.key_cache[i],
-                     past_key_values.value_cache[i])
-                    for i in range(len(past_key_values))
-                )
+                n_layers = len(past_key_values)
+                if hasattr(past_key_values, 'key_cache'):
+                    past_key_values = tuple(
+                        (past_key_values.key_cache[i],
+                         past_key_values.value_cache[i])
+                        for i in range(n_layers)
+                    )
+                else:
+                    past_key_values = tuple(
+                        past_key_values[i] for i in range(n_layers)
+                    )
 
         past_len = 0
         if past_key_values is not None and len(past_key_values) > 0:
