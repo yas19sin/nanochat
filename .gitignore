@@ -11,3 +11,7 @@ eval_bundle/
 # Local setup
 CLAUDE.md
 wandb/
+
+# Reference repos (read-only, not part of nanochat source tree)
+Attention-Residuals/
+TinyEngram/
