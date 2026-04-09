@@ -96,6 +96,98 @@ See an example [here](https://github.com/karpathy/nanochat/pull/498#issuecomment
 
 The important thing to note is that nanochat is written and configured around one single dial of complexity - the depth of the transformer. This single integer automatically determines all other hyperparameters (the width of the transformer, number of heads, learning rate adjustments, training horizons, weight decays, ...) so that the trained model comes out compute optimal. The idea is that the user doesn't have to think about or set any of this, they are simply asking for a smaller or bigger model using `--depth`, and everything "just works". By sweeping out the depth, you achieve the nanochat miniseries of compute optimal models at various sizes. GPT-2 capability model (which is of most interest at the moment) happens to be somewhere around d24-d26 range with the current code. But any candidate changes to the repo have to be principled enough that they work for all settings of depth.
 
+## Moroccan Darija Fork
+
+This fork extends nanochat with Moroccan Darija (Moroccan Arabic) support and experimental architecture extensions.
+
+### Data Preparation
+
+The pretraining corpus is [Lyte/darija-pretraining-corpus](https://huggingface.co/datasets/Lyte/darija-pretraining-corpus) from HuggingFace (subsets: `arabic_raw`, `bilingual`, `pure`). To prepare the data shards:
+
+```bash
+pip install datasets pyarrow
+python -m scripts.darija_data_prep
+```
+
+This streams the dataset and writes parquet shards to `$NANOCHAT_DATA_DIR` (defaults to `~/.cache/nanochat/darija_data`). The last shard is reserved for validation. Options:
+
+```bash
+python -m scripts.darija_data_prep --val-size 50000        # validation set size
+python -m scripts.darija_data_prep --no-streaming           # download full dataset first
+python -m scripts.darija_data_prep --cache-dir /tmp/hf      # HF cache location
+```
+
+### Darija Training Pipeline
+
+The full pipeline (tokenizer → pretraining → SFT → eval) is in [runs/darija.sh](runs/darija.sh):
+
+```bash
+# Minimal (no wandb)
+bash runs/darija.sh
+
+# With wandb logging
+WANDB_RUN=darija bash runs/darija.sh
+```
+
+The script trains a depth-18 (~700M param) model with D:N ratio 12 and FP8 on 8×H100/H200. After training, chat with your Darija model:
+
+```bash
+python -m scripts.chat_cli -p 'كيفاش نقدر نتعلم الدارجة؟'
+python -m scripts.chat_web  # browser UI
+```
+
+### Architecture Extensions: AttnRes & Engram
+
+This fork integrates two experimental architecture extensions that can be toggled via CLI flags:
+
+**Block Attention Residuals** ([MoonshotAI/Attention-Residuals](https://github.com/MoonshotAI/Attention-Residuals)) replaces fixed residual accumulation with depth-wise softmax attention over block representations. Instead of `x = x + sublayer(x)`, each block's output is aggregated via learned attention across all completed blocks. Adds negligible parameters (~38K on a d12 model).
+
+**Engram** ([AutoArk/TinyEngram](https://github.com/AutoArk/TinyEngram)) is a conditional n-gram memory module with O(1) hash-based lookup. It retrieves pre-computed embeddings for common n-gram patterns (named entities, phrases, factual associations) and injects them into early layers via learned gating, offloading memorization from the transformer's attention layers.
+
+Enable them with CLI flags on `base_train.py`:
+
+```bash
+# Baseline (no extensions)
+torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- --depth=12
+
+# AttnRes only (negligible param overhead)
+torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- --depth=12 \
+    --use-attn-res --attn-res-num-blocks=4
+
+# Engram only (~15% param budget for hash tables)
+torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- --depth=12 \
+    --use-engram --engram-table-size=131072 --engram-ngram-max=3
+
+# Both combined
+torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- --depth=12 \
+    --use-attn-res --use-engram
+```
+
+Engram-specific flags:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--use-engram` | off | Enable Engram memory injection |
+| `--engram-table-size` | 131072 | Entries per n-gram order per hash head |
+| `--engram-ngram-max` | 3 | Maximum n-gram order (2=bigrams, 3=trigrams) |
+| `--engram-inject-layers` | auto | Comma-separated layer indices (e.g. `1,3,5`) |
+| `--engram-param-ratio` | 0.15 | Fraction of total params for Engram tables |
+
+AttnRes-specific flags:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--use-attn-res` | off | Enable Block Attention Residuals |
+| `--attn-res-num-blocks` | 4 | Number of AttnRes blocks |
+
+For programmatic ablation experiments, use `make_ablation_configs()` in `gpt.py`:
+
+```python
+from nanochat.gpt import make_ablation_configs
+configs = make_ablation_configs(depth=20, model_dim=1280, n_head=10, n_kv_head=10)
+# Returns: {'baseline': ..., 'attn_res': ..., 'engram': ..., 'attn_res_engram': ...}
+```
+
 ## Running on CPU / MPS
 
 The script [runs/runcpu.sh](runs/runcpu.sh) shows a very simple example of running on CPU or Apple Silicon. It dramatically shrinks the LLM that is being trained to make things fit into a reasonable time interval of a few ten minutes of training. You will not get strong results in this way.
@@ -144,11 +236,13 @@ I've published a number of guides that might contain helpful information, most r
 │   └── repackage_data_reference.py # Pretraining data shard generation
 ├── nanochat
 │   ├── __init__.py                 # empty
+│   ├── attn_res.py                 # Block Attention Residuals module
 │   ├── checkpoint_manager.py       # Save/Load model checkpoints
 │   ├── common.py                   # Misc small utilities, quality of life
 │   ├── core_eval.py                # Evaluates base model CORE score (DCLM paper)
 │   ├── dataloader.py               # Tokenizing Distributed Data Loader
 │   ├── dataset.py                  # Download/read utils for pretraining data
+│   ├── engram.py                   # Engram conditional n-gram memory module
 │   ├── engine.py                   # Efficient model inference with KV Cache
 │   ├── execution.py                # Allows the LLM to execute Python code as tool
 │   ├── gpt.py                      # The GPT nn.Module Transformer
@@ -160,6 +254,7 @@ I've published a number of guides that might contain helpful information, most r
 │   └── ui.html                     # HTML/CSS/JS for nanochat frontend
 ├── pyproject.toml
 ├── runs
+│   ├── darija.sh                   # Full Darija pipeline (tok→pretrain→SFT→eval)
 │   ├── miniseries.sh               # Miniseries training script
 │   ├── runcpu.sh                   # Small example of how to run on CPU/MPS
 │   ├── scaling_laws.sh             # Scaling laws experiments
@@ -172,18 +267,23 @@ I've published a number of guides that might contain helpful information, most r
 │   ├── chat_rl.py                  # Chat model: reinforcement learning
 │   ├── chat_sft.py                 # Chat model: train SFT
 │   ├── chat_web.py                 # Chat model: talk to over WebUI
+│   ├── darija_data_prep.py         # Darija data: download & shard from HF
+│   ├── export_hf.py                # Export model to HuggingFace format
 │   ├── tok_eval.py                 # Tokenizer: evaluate compression rate
 │   └── tok_train.py                # Tokenizer: train it
 ├── tasks
 │   ├── arc.py                      # Multiple choice science questions
 │   ├── common.py                   # TaskMixture | TaskSequence
 │   ├── customjson.py               # Make Task from arbitrary jsonl convos
+│   ├── darija_instruct.py          # Darija instruction-following eval
+│   ├── darija_sft.py               # Darija SFT data mixtures
 │   ├── gsm8k.py                    # 8K Grade School Math questions
 │   ├── humaneval.py                # Misnomer; Simple Python coding task
 │   ├── mmlu.py                     # Multiple choice questions, broad topics
 │   ├── smoltalk.py                 # Conglomerate dataset of SmolTalk from HF
 │   └── spellingbee.py              # Task teaching model to spell/count letters
 ├── tests
+│   ├── test_attention_fallback.py
 │   └── test_engine.py
 └── uv.lock
 ```
@@ -198,6 +298,9 @@ Current AI policy: disclosure. When submitting a PR, please declare any parts th
 
 - The name (nanochat) derives from my earlier project [nanoGPT](https://github.com/karpathy/nanoGPT), which only covered pretraining.
 - nanochat is also inspired by [modded-nanoGPT](https://github.com/KellerJordan/modded-nanogpt), which gamified the nanoGPT repo with clear metrics and a leaderboard, and borrows a lot of its ideas and some implementation for pretraining.
+- Block Attention Residuals: [MoonshotAI/Attention-Residuals](https://github.com/MoonshotAI/Attention-Residuals) (Chen et al., 2026)
+- Engram conditional n-gram memory: [AutoArk/TinyEngram](https://github.com/AutoArk/TinyEngram)
+- Darija pretraining corpus: [Lyte/darija-pretraining-corpus](https://huggingface.co/datasets/Lyte/darija-pretraining-corpus)
 - Thank you to [HuggingFace](https://huggingface.co/) for fineweb and smoltalk.
 - Thank you [Lambda](https://lambda.ai/service/gpu-cloud) for the compute used in developing this project.
 - Thank you to chief LLM whisperer 🧙‍♂️ Alec Radford for advice/guidance.
