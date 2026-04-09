@@ -10,6 +10,7 @@ torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --device-batch-s
 """
 
 from nanochat.report import get_report
+from nanochat.engram import set_engram_step
 from tasks.darija_sft import MoroccanDarijaInstruct573K, TuluDarijaEnglish
 from tasks.common import TaskMixture
 from scripts.chat_eval import run_chat_eval
@@ -371,6 +372,8 @@ def get_lr_multiplier(progress):
         return (1 - decay) * 1.0 + decay * args.final_lr_frac
 
 # Momentum scheduler for Muon optimizer (warms up to 0.97, warms down to 0.90 during LR warmdown)
+
+
 def get_muon_momentum(progress):
     if progress < 0.05:
         frac = progress / 0.05
@@ -392,6 +395,9 @@ total_training_time = 0  # total wall-clock time of training
 step = 0
 while True:
     flops_so_far = num_flops_per_token * args.total_batch_size * step
+    # Tell Engram the current training step (for warmup/clamp schedule)
+    if model.config.use_engram:
+        set_engram_step(step)
 
     # Synchronize last_step across all ranks to avoid hangs in the distributed setting
     if ddp:
