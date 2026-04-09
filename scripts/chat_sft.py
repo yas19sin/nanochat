@@ -69,7 +69,7 @@ parser.add_argument("--warmup-ratio", type=float, default=0.0,
                     help="ratio of iterations for LR warmup")
 parser.add_argument("--warmdown-ratio", type=float, default=0.5,
                     help="ratio of iterations for LR warmdown")
-parser.add_argument("--final-lr-frac", type=float, default=0.0,
+parser.add_argument("--final-lr-frac", type=float, default=0.05,
                     help="final LR as fraction of initial LR")
 # Evaluation
 parser.add_argument("--eval-every", type=int, default=200,
@@ -126,7 +126,7 @@ for name, fallback, source in [
     ("device_batch_size", 32,    meta),
     ("total_batch_size",  524288, meta),
     ("embedding_lr",      0.3,   pretrain_user_config),
-    ("unembedding_lr",    0.004, pretrain_user_config),
+    ("unembedding_lr",    0.008, pretrain_user_config),
     ("matrix_lr",         0.02,  pretrain_user_config),
 ]:
     arg_val = getattr(args, name)
@@ -370,13 +370,16 @@ def get_lr_multiplier(progress):
         decay = (progress - (1.0 - args.warmdown_ratio)) / args.warmdown_ratio
         return (1 - decay) * 1.0 + decay * args.final_lr_frac
 
-# Momentum scheduler for Muon optimizer
-
-
-def get_muon_momentum(it):
-    frac = min(it / 300, 1)
-    momentum = (1 - frac) * 0.85 + frac * 0.95
-    return momentum
+# Momentum scheduler for Muon optimizer (warms up to 0.97, warms down to 0.90 during LR warmdown)
+def get_muon_momentum(progress):
+    if progress < 0.05:
+        frac = progress / 0.05
+        return (1 - frac) * 0.85 + frac * 0.97
+    elif progress <= 1.0 - args.warmdown_ratio:
+        return 0.97
+    else:
+        decay = (progress - (1.0 - args.warmdown_ratio)) / args.warmdown_ratio
+        return 0.97 * (1 - decay) + 0.90 * decay
 
 
 # -----------------------------------------------------------------------------
@@ -504,7 +507,7 @@ while True:
         progress = max(progress, approx_progress)
     # step the optimizer
     lrm = get_lr_multiplier(progress)
-    muon_momentum = get_muon_momentum(step)
+    muon_momentum = get_muon_momentum(progress)
     for group in optimizer.param_groups:
         group["lr"] = group["initial_lr"] * lrm
         if group['kind'] == 'muon':

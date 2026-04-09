@@ -42,9 +42,9 @@ python -m scripts.tok_eval
 
 # -----------------------------------------------------------------------------
 # Base model pretraining
-# depth=18=~700M params, ratio=10.5 (compute-optimal), FP8 for H200/H100
+# depth=18=~700M params, ratio=12 (compute-optimal per upstream scaling re-run), FP8 for H200/H100
 torchrun --standalone --nproc_per_node=8 -m scripts.base_train \
-    -- --depth=18 --target-param-data-ratio=10.5 --device-batch-size=16 \
+    -- --depth=18 --target-param-data-ratio=12 --device-batch-size=16 \
     --fp8 --run="$WANDB_RUN"
 
 # Evaluate base model
