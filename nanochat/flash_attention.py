@@ -171,6 +171,10 @@ def flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seqlens=N
     k_sdpa = k_full.transpose(1, 2)
     v_sdpa = v_full.transpose(1, 2)
 
+    # Ensure matching dtypes (KV cache may be bf16 while q is fp32 during generation)
+    if q_sdpa.dtype != k_sdpa.dtype:
+        q_sdpa = q_sdpa.to(k_sdpa.dtype)
+
     enable_gqa = q_sdpa.size(1) != k_sdpa.size(1)
     y_sdpa = _sdpa_attention(q_sdpa, k_sdpa, v_sdpa, window_size, enable_gqa)
 

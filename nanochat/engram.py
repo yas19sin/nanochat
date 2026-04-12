@@ -177,6 +177,7 @@ class MultiHeadEmbedding(nn.Module):
         super().__init__()
         self.num_heads = len(table_sizes)
         self.embed_dim = embed_dim
+        self._table_sizes = table_sizes  # saved for reinit
         offsets = [0]
         for s in table_sizes[:-1]:
             offsets.append(offsets[-1] + s)
@@ -184,6 +185,13 @@ class MultiHeadEmbedding(nn.Module):
             "offsets", torch.tensor(offsets, dtype=torch.long))
         total = sum(table_sizes)
         self.embedding = nn.Embedding(total, embed_dim)
+
+    def reinit_buffers(self):
+        """Re-create offset buffer on current device (needed after meta-device init + to_empty)."""
+        offsets = [0]
+        for s in self._table_sizes[:-1]:
+            offsets.append(offsets[-1] + s)
+        self.offsets = torch.tensor(offsets, dtype=torch.long, device=self.embedding.weight.device)
 
     def forward(self, hash_ids: torch.Tensor) -> torch.Tensor:
         """
@@ -222,6 +230,18 @@ class Engram(nn.Module):
         # Hasher is NOT an nn.Module — it's pure numpy, shared if needed
         self.hasher = NgramHasher(config, [layer_id])
 
+        # Precompute torch hash constants (registered as buffers for device tracking)
+        mults_np = self.hasher.layer_multipliers[layer_id]
+        self.register_buffer('_hash_mults',
+                             torch.from_numpy(mults_np).long(), persistent=False)
+        mods = []
+        for n in range(2, config.max_ngram + 1):
+            ngram_idx = n - 2
+            for head_idx in range(config.n_heads):
+                mods.append(self.hasher.vocab_sizes[layer_id][ngram_idx][head_idx])
+        self.register_buffer('_hash_mods',
+                             torch.tensor(mods, dtype=torch.long), persistent=False)
+
         # Embedding table
         table_sizes = self.hasher.all_table_sizes(layer_id)
         per_head_dim = config.embed_dim // config.n_heads
@@ -236,6 +256,48 @@ class Engram(nn.Module):
         # Norms for gate computation
         self.key_norm = nn.RMSNorm(hidden_size)
         self.query_norm = nn.RMSNorm(hidden_size)
+
+    def reinit_hash_buffers(self):
+        """Re-create hash constant buffers on current device (needed after meta-device init + to_empty)."""
+        device = self.value_proj.weight.device
+        mults_np = self.hasher.layer_multipliers[self.layer_id]
+        self._hash_mults = torch.from_numpy(mults_np).long().to(device)
+        mods = []
+        for n in range(2, self.config.max_ngram + 1):
+            ngram_idx = n - 2
+            for head_idx in range(self.config.n_heads):
+                mods.append(self.hasher.vocab_sizes[self.layer_id][ngram_idx][head_idx])
+        self._hash_mods = torch.tensor(mods, dtype=torch.long, device=device)
+        self.multi_head_emb.reinit_buffers()
+
+    def _hash_torch(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Pure-torch n-gram hashing. Stays entirely on device (no CPU round-trip).
+        Args: input_ids [B, T] long tensor
+        Returns: [B, T, total_heads] long tensor of hash indices
+        """
+        B, T = input_ids.shape
+        mults = self._hash_mults
+
+        # Build shifted copies
+        shifts = [input_ids]
+        for k in range(1, self.config.max_ngram):
+            shifted = F.pad(input_ids, (k, 0), value=self.config.pad_id)[:, :T]
+            shifts.append(shifted)
+
+        all_hashes = []
+        mod_idx = 0
+        for n in range(2, self.config.max_ngram + 1):
+            # XOR-based hash mixing
+            mix = shifts[0] * mults[0]
+            for k in range(1, n):
+                mix = torch.bitwise_xor(mix, shifts[k] * mults[k])
+            for _ in range(self.config.n_heads):
+                # torch.remainder ensures non-negative results (Python-style modulo)
+                # unlike % which uses C-style truncated division and can be negative
+                all_hashes.append(torch.remainder(mix, self._hash_mods[mod_idx]))
+                mod_idx += 1
+
+        return torch.stack(all_hashes, dim=2)  # [B, T, total_heads]
 
     def _compute_gate(self, hidden: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
         """
@@ -261,10 +323,8 @@ class Engram(nn.Module):
         Returns:
             [B, T, D] engram contribution (to be added to hidden state)
         """
-        # Hash on CPU (numpy), then move to device
-        ids_np = input_ids.detach().cpu().numpy()
-        hash_ids = self.hasher.hash(ids_np, self.layer_id)
-        hash_ids_t = torch.from_numpy(hash_ids).to(input_ids.device)
+        # Hash entirely on device (no CPU round-trip)
+        hash_ids_t = self._hash_torch(input_ids)
 
         # Retrieve and flatten embeddings
         embeddings = self.multi_head_emb(hash_ids_t)  # [B, T, engram_hidden]
@@ -282,6 +342,7 @@ class Engram(nn.Module):
 
         # Value: project to hidden size and apply gate
         value = self.value_proj(embeddings)  # [B, T, D]
+        self.last_gate = gate.detach()  # [B, T, 1] for diagnostics
         return gate * value
 
     def num_table_params(self) -> int:

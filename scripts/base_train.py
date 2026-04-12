@@ -75,6 +75,10 @@ parser.add_argument("--engram-table-size", type=int, default=131072,
                     help="Engram table size per n-gram order per hash head")
 parser.add_argument("--engram-ngram-max", type=int, default=3,
                     help="maximum n-gram order for Engram")
+parser.add_argument("--engram-n-heads", type=int, default=4,
+                    help="hash heads per n-gram order for Engram (Bloom filter)")
+parser.add_argument("--engram-embed-dim", type=int, default=256,
+                    help="total Engram embedding dimension (split across heads)")
 parser.add_argument("--engram-inject-layers", type=str, default="",
                     help="comma-separated layer indices for Engram injection (empty=auto)")
 parser.add_argument("--engram-param-ratio", type=float, default=0.15,
@@ -195,7 +199,8 @@ def build_model_meta(depth):
         window_pattern=args.window_pattern,
         use_attn_res=args.use_attn_res, attn_res_num_blocks=args.attn_res_num_blocks,
         use_engram=args.use_engram, engram_table_size=args.engram_table_size,
-        engram_ngram_max=args.engram_ngram_max, engram_inject_layers=engram_layers,
+        engram_ngram_max=args.engram_ngram_max, engram_n_heads=args.engram_n_heads,
+        engram_embed_dim=args.engram_embed_dim, engram_inject_layers=engram_layers,
         engram_param_ratio=args.engram_param_ratio,
     )
     with torch.device("meta"):

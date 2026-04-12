@@ -47,9 +47,14 @@ def block_attn_res(
     V = torch.stack(sources, dim=0)
     K = norm_fn(V)
     # logits: [num_sources, B, T] — dot product of pseudo-query with each key
-    logits = torch.einsum("d, n b t d -> n b t", w_l, K)
+    # Cast pseudo-query to match K dtype (K may be bf16 during generation without autocast)
+    w_cast = w_l.to(K.dtype) if w_l.dtype != K.dtype else w_l
+    logits = torch.einsum("d, n b t d -> n b t", w_cast, K)
     # alpha: softmax over block dimension (dim=0), NOT sequence dimension
     alpha = logits.softmax(dim=0)
+    # Ensure matching dtypes (softmax may produce fp32 while V is bf16 during generation)
+    if alpha.dtype != V.dtype:
+        alpha = alpha.to(V.dtype)
     # weighted sum over blocks → [B, T, d]
     return torch.einsum("n b t, n b t d -> b t d", alpha, V)
 

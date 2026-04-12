@@ -47,6 +47,8 @@ class GPTConfig:
     use_engram: bool = False
     engram_table_size: int = 131072      # entries per n-gram order per hash head
     engram_ngram_max: int = 3            # maximum n-gram order
+    engram_n_heads: int = 4              # hash heads per n-gram order (Bloom filter)
+    engram_embed_dim: int = 256          # total embedding dim (split across heads)
     engram_inject_layers: List[int] = field(
         default_factory=list)  # empty = auto-select early layers
     # fraction of total params allocated to Engram tables
@@ -58,7 +60,9 @@ class GPTConfig:
 # ---------------------------------------------------------------------------
 def make_ablation_configs(depth: int, model_dim: int, n_head: int, n_kv_head: int,
                           vocab_size: int = 32768, sequence_len: int = 2048,
-                          window_pattern: str = "SSSL"):
+                          window_pattern: str = "SSSL",
+                          engram_table_size: int = 131072, engram_n_heads: int = 4,
+                          engram_embed_dim: int = 256, attn_res_num_blocks: int = 4):
     """
     Return a dict of 4 GPTConfig presets for ablation experiments:
       - baseline:     standard NanoChat (no AttnRes, no Engram)
@@ -74,14 +78,15 @@ def make_ablation_configs(depth: int, model_dim: int, n_head: int, n_kv_head: in
     base = dict(sequence_len=sequence_len, vocab_size=vocab_size,
                 n_layer=depth, n_head=n_head, n_kv_head=n_kv_head,
                 n_embd=model_dim, window_pattern=window_pattern)
-    # Auto-select Engram injection layers (early 1/4 of layers, spaced)
-    inject = list(range(1, max(2, depth // 4), 2))
+    engram_kw = dict(engram_table_size=engram_table_size, engram_n_heads=engram_n_heads,
+                     engram_embed_dim=engram_embed_dim)
+    # inject_layers left empty → auto-selects non-VE layers in GPT.__init__
     return {
         'baseline': GPTConfig(**base),
-        'attn_res': GPTConfig(**base, use_attn_res=True, attn_res_num_blocks=4),
-        'engram': GPTConfig(**base, use_engram=True, engram_inject_layers=inject),
-        'attn_res_engram': GPTConfig(**base, use_attn_res=True, attn_res_num_blocks=4,
-                                     use_engram=True, engram_inject_layers=inject),
+        'attn_res': GPTConfig(**base, use_attn_res=True, attn_res_num_blocks=attn_res_num_blocks),
+        'engram': GPTConfig(**base, use_engram=True, **engram_kw),
+        'attn_res_engram': GPTConfig(**base, use_attn_res=True, attn_res_num_blocks=attn_res_num_blocks,
+                                     use_engram=True, **engram_kw),
     }
 
 
@@ -283,11 +288,14 @@ class GPT(nn.Module):
             from nanochat.engram import Engram, EngramConfig
             inject_layers = config.engram_inject_layers
             if not inject_layers:
-                # Auto-select early layers (TinyEngram: early layers are best for static patterns)
-                inject_layers = [1, min(3, config.n_layer - 1)]
+                # Auto-select early non-VE layers (avoid stacking with value embeddings)
+                non_ve = [i for i in range(config.n_layer) if not has_ve(i, config.n_layer)]
+                inject_layers = non_ve[:2] if len(non_ve) >= 2 else non_ve[:1] or [0]
             engram_cfg = EngramConfig(
                 table_size=config.engram_table_size,
                 max_ngram=config.engram_ngram_max,
+                n_heads=config.engram_n_heads,
+                embed_dim=config.engram_embed_dim,
                 inject_layers=inject_layers,
             )
             self.engram_layers = nn.ModuleDict({
@@ -372,6 +380,7 @@ class GPT(nn.Module):
         # Engram init: embedding tables get small normal init, projections uniform
         if self.config.use_engram:
             for eng in self.engram_layers.values():
+                eng.reinit_hash_buffers()  # re-create hash constants after meta-device init
                 torch.nn.init.normal_(
                     eng.multi_head_emb.embedding.weight, mean=0.0, std=0.02)
                 torch.nn.init.uniform_(eng.value_proj.weight, -s, s)
@@ -663,11 +672,6 @@ class GPT(nn.Module):
             ar_state = AttnResState(x, block_size)
 
         for i, block in enumerate(self.transformer.h):
-            # Engram injection: add retrieved n-gram memory BEFORE the transformer block
-            # (TinyEngram: early injection works best for static pattern reconstruction)
-            if use_engram and str(i) in self.engram_layers:
-                x = x + self.engram_layers[str(i)](x, idx)
-
             if use_attn_res:
                 # AttnRes path: depth-wise attention replaces fixed residual connections
                 ar_layer = self.attn_res_layers[i]
@@ -676,6 +680,9 @@ class GPT(nn.Module):
 
                 # Attention sub-layer: get input via inter-block attention, compute attn output
                 x_attn_in = ar_layer.get_input_for_attn(ar_state)
+                # Engram injection into AttnRes input so gradients flow through attn → loss
+                if use_engram and str(i) in self.engram_layers:
+                    x_attn_in = x_attn_in + self.engram_layers[str(i)](x_attn_in, idx)
                 attn_out = block.attn(
                     norm(x_attn_in), ve, cos_sin, self.window_sizes[i], kv_cache)
                 ar_state.accumulate(attn_out)
@@ -697,6 +704,9 @@ class GPT(nn.Module):
             else:
                 # Standard path: fixed residual connections with per-layer scaling
                 x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
+                # Engram injection before transformer block
+                if use_engram and str(i) in self.engram_layers:
+                    x = x + self.engram_layers[str(i)](x, idx)
                 ve = self.value_embeds[str(i)](idx).to(
                     x.dtype) if str(i) in self.value_embeds else None
                 x = block(x, ve, cos_sin, self.window_sizes[i], kv_cache)
