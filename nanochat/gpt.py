@@ -47,8 +47,10 @@ class GPTConfig:
     use_engram: bool = False
     engram_table_size: int = 131072      # entries per n-gram order per hash head
     engram_ngram_max: int = 3            # maximum n-gram order
-    engram_n_heads: int = 4              # hash heads per n-gram order (Bloom filter)
-    engram_embed_dim: int = 256          # total embedding dim (split across heads)
+    # hash heads per n-gram order (Bloom filter)
+    engram_n_heads: int = 4
+    # total embedding dim (split across heads)
+    engram_embed_dim: int = 256
     engram_inject_layers: List[int] = field(
         default_factory=list)  # empty = auto-select early layers
     # fraction of total params allocated to Engram tables
@@ -289,8 +291,10 @@ class GPT(nn.Module):
             inject_layers = config.engram_inject_layers
             if not inject_layers:
                 # Auto-select early non-VE layers (avoid stacking with value embeddings)
-                non_ve = [i for i in range(config.n_layer) if not has_ve(i, config.n_layer)]
-                inject_layers = non_ve[:2] if len(non_ve) >= 2 else non_ve[:1] or [0]
+                non_ve = [i for i in range(
+                    config.n_layer) if not has_ve(i, config.n_layer)]
+                inject_layers = non_ve[:2] if len(
+                    non_ve) >= 2 else non_ve[:1] or [0]
             engram_cfg = EngramConfig(
                 table_size=config.engram_table_size,
                 max_ngram=config.engram_ngram_max,
@@ -346,6 +350,12 @@ class GPT(nn.Module):
         # Decaying x0 init: earlier layers get more input embedding blending
         for i in range(n_layer):
             self.x0_lambdas.data[i] = 0.20 - (0.15 * i / max(n_layer - 1, 1))
+
+        # Smear/backout scalars and smear gate must be explicitly initialized
+        # (upstream fix: karpathy/nanochat#686 - ensures reproducibility from init_weights)
+        torch.nn.init.zeros_(self.smear_lambda)
+        torch.nn.init.constant_(self.backout_lambda, 0.2)
+        torch.nn.init.uniform_(self.smear_gate.weight, 0.0, 0.02)
 
         # Value embeddings (init like c_v: uniform with same std)
         for ve in self.value_embeds.values():
@@ -682,7 +692,8 @@ class GPT(nn.Module):
                 x_attn_in = ar_layer.get_input_for_attn(ar_state)
                 # Engram injection into AttnRes input so gradients flow through attn → loss
                 if use_engram and str(i) in self.engram_layers:
-                    x_attn_in = x_attn_in + self.engram_layers[str(i)](x_attn_in, idx)
+                    x_attn_in = x_attn_in + \
+                        self.engram_layers[str(i)](x_attn_in, idx)
                 attn_out = block.attn(
                     norm(x_attn_in), ve, cos_sin, self.window_sizes[i], kv_cache)
                 ar_state.accumulate(attn_out)
