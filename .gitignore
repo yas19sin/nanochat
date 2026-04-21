@@ -15,3 +15,5 @@ wandb/
 # Reference repos (read-only, not part of nanochat source tree)
 Attention-Residuals/
 TinyEngram/
+smoke_mixed.log
+ablation_results_5090/wandb_offline/
