@@ -21,6 +21,7 @@ Usage (respects $HF_TOKEN / $HUGGINGFACE_HUB_TOKEN):
 
 import os
 import argparse
+import glob
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -109,6 +110,8 @@ def main():
     parser.add_argument("--shard-size", type=int, default=TRAIN_SHARD_SIZE)
     parser.add_argument("--no-streaming", action="store_true",
                         help="download locally (uses lots of disk for finephrase!)")
+    parser.add_argument("--force", action="store_true",
+                        help="re-download sources even if their shards already exist")
     args = parser.parse_args()
 
     token = args.hf_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
@@ -138,6 +141,14 @@ def main():
         print(f"\n--- Loading source '{key}': {ds_id} config={config} split={split} "
               f"cap={effective_cap or 'unlimited'} ---")
 
+        # idempotent rerun: if shards already exist for this source, skip it
+        existing = sorted(glob.glob(os.path.join(output_dir, f"{key}_train_*.parquet")))
+        if existing and not args.force:
+            print(f"  ** found {len(existing)} existing shard(s) for '{key}', skipping "
+                  f"(use --force to re-download).")
+            train_idx_by_key[key] = len(existing)
+            continue
+
         try:
             ds = load_dataset(
                 ds_id,
@@ -155,23 +166,28 @@ def main():
         buf = []
         idx = 0
         seen = 0
-        for row in ds:
-            seen += 1
-            if effective_cap and seen > effective_cap:
-                break
-            docs = extractor(row)
-            for doc in docs:
-                if lang == "darija" and len(val_rows) < args.val_size:
-                    val_rows.append(doc)
-                    continue
-                buf.append(doc)
-                if len(buf) >= args.shard_size:
-                    _write_shard(output_dir, key, idx, buf, TRAIN_ROW_GROUP_SIZE)
-                    total_train += len(buf)
-                    idx += 1
-                    buf = []
-            if seen % 100_000 == 0:
-                print(f"  ...{key}: seen {seen:,} rows, train_so_far={total_train + len(buf):,}")
+        # wrap iteration so a mid-stream network error doesn't kill the whole job
+        try:
+            for row in ds:
+                seen += 1
+                if effective_cap and seen > effective_cap:
+                    break
+                docs = extractor(row)
+                for doc in docs:
+                    if lang == "darija" and len(val_rows) < args.val_size:
+                        val_rows.append(doc)
+                        continue
+                    buf.append(doc)
+                    if len(buf) >= args.shard_size:
+                        _write_shard(output_dir, key, idx, buf, TRAIN_ROW_GROUP_SIZE)
+                        total_train += len(buf)
+                        idx += 1
+                        buf = []
+                if seen % 100_000 == 0:
+                    print(f"  ...{key}: seen {seen:,} rows, train_so_far={total_train + len(buf):,}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  !! stream for '{key}' died after {seen:,} rows: {exc}")
+            print(f"  !! flushing partial buffer ({len(buf)} docs) and moving on.")
 
         if buf:
             _write_shard(output_dir, key, idx, buf, TRAIN_ROW_GROUP_SIZE)
