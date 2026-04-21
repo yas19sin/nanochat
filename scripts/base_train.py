@@ -129,6 +129,8 @@ parser.add_argument("--save-every", type=int, default=-1,
 # Output
 parser.add_argument("--model-tag", type=str, default=None,
                     help="override model tag for checkpoint directory name")
+parser.add_argument("--seed", type=int, default=-1,
+                    help="override global RNG seed used for model init (-1 = keep default 42)")
 args = parser.parse_args()
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
@@ -216,6 +218,13 @@ model_config_kwargs = asdict(model_config)
 print0(f"Model config:\n{json.dumps(model_config_kwargs, indent=2)}")
 # 2) All tensors get storage on target device but with uninitialized (garbage) data
 model.to_empty(device=device)
+# Re-seed right before weight init so --seed actually changes initialization.
+# compute_init() hardcoded the global seed to 42; override here if user asked.
+if args.seed != -1:
+    print0(f"Re-seeding RNG to {args.seed} before model.init_weights()")
+    torch.manual_seed(args.seed)
+    if device_type == "cuda":
+        torch.cuda.manual_seed(args.seed)
 model.init_weights()  # 3) All tensors get initialized
 
 # If we are resuming, overwrite the model parameters with those of the checkpoint
