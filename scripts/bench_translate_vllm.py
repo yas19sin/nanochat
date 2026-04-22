@@ -124,6 +124,8 @@ def main():
                         help="comma-separated batch sizes to test")
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--gpu-mem-util", type=float, default=0.90)
+    parser.add_argument("--enforce-eager", action="store_true",
+                        help="Disable torch.compile + CUDA graphs (use when FA2 PTX mismatches the driver).")
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--out", default="bench_results.json")
     args = parser.parse_args()
@@ -143,7 +145,7 @@ def main():
         dtype="bfloat16",
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_mem_util,
-        enforce_eager=False,
+        enforce_eager=args.enforce_eager,
         download_dir=os.environ.get("HF_HUB_CACHE"),
         trust_remote_code=True,
     )
