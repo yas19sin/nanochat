@@ -48,9 +48,9 @@ pip install "vllm>=0.7.3" "transformers>=4.46" "datasets>=3.0" \
 # -----------------------------------------------------------------------------
 # 4) pre-download the model so we can see download speed and disk usage
 echo "=== downloading model ==="
-huggingface-cli download Lyte/tiny-aya-darija-v5 \
+python -m huggingface_hub.commands.huggingface_cli download \
+    Lyte/tiny-aya-darija-v5 \
     --token "$HF_TOKEN" \
-    --local-dir-use-symlinks False \
     || { echo "model download failed"; exit 1; }
 
 df -h /workspace
@@ -74,15 +74,13 @@ echo "=== RESULT ==="
 cat /workspace/bench_results.json
 
 # try to publish to HF as a private repo so you don't lose it if the box dies
-huggingface-cli repo create bench-aya-darija-5090 \
-    --type dataset --repo-type dataset \
-    --token "$HF_TOKEN" --private --exist-ok || true
-
-huggingface-cli upload \
+python -m huggingface_hub.commands.huggingface_cli upload \
     "${HF_USER:-Lyte}/bench-aya-darija-5090" \
     /workspace/bench_results.json \
     "bench_$(date -u +%Y%m%d_%H%M).json" \
     --repo-type dataset \
-    --token "$HF_TOKEN" || echo "upload failed, but local file saved"
+    --token "$HF_TOKEN" \
+    --create-pr=False 2>/dev/null \
+    || echo "upload skipped (repo may not exist yet, local file saved)"
 
 echo "=== DONE. copy bench_results.json contents ==="
