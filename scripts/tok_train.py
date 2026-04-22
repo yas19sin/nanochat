@@ -29,12 +29,20 @@ print(f"doc_cap: {args.doc_cap:,}")
 print(f"vocab_size: {args.vocab_size:,}")
 
 SUBSET_WEIGHTS = {
+    # legacy Darija-only prep prefixes
     "pure": 1.3,
     "bilingual": 1.0,
     "arabic_raw": 0.9,
-    "other": 1.0,
+    # ablation_data_prep.py mixed-source prefixes (Darija-biased because that's
+    # the production target; English still gets ~half weight because corpus is
+    # ~half English by row count)
+    "darijapure": 1.3,
+    "fineweb":    1.0,   # Lyte darija-translation-data (darija + english)
+    "finephrase": 0.9,   # pure English
+    "other":      1.0,
 }
-SUBSET_PREFIXES = ("arabic_raw", "bilingual", "pure")
+SUBSET_PREFIXES = ("arabic_raw", "bilingual", "pure",
+                   "darijapure", "fineweb", "finephrase")
 
 # -----------------------------------------------------------------------------
 # Text iterator
