@@ -114,21 +114,76 @@ def write_shard(out_dir: Path, shard_idx: int, rows: list) -> dict:
     return {"file": fname, "rows": len(rows), "tokens": tokens}
 
 
+def _upload_with_retry(api, *, path_or_fileobj, path_in_repo, repo_id,
+                       commit_message, max_attempts: int = 4,
+                       timeout_s: int = 300):
+    """Upload a single file with bounded retries and a hard wall-clock timeout.
+
+    Uses a background thread so a stuck TCP socket (the hf_transfer hang we saw
+    on shard_00198) can't block forever. If a worker times out we abandon it
+    and retry with a fresh HfApi call.
+    """
+    import threading
+    from huggingface_hub import HfApi  # noqa: F401  (api is already an HfApi)
+
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        result: dict = {}
+
+        def _work():
+            try:
+                api.upload_file(
+                    path_or_fileobj=path_or_fileobj,
+                    path_in_repo=path_in_repo,
+                    repo_id=repo_id, repo_type="dataset",
+                    commit_message=commit_message,
+                )
+                result["ok"] = True
+            except Exception as exc:  # pragma: no cover - network paths
+                result["exc"] = exc
+
+        t = threading.Thread(target=_work, daemon=True)
+        t.start()
+        t.join(timeout_s)
+        if result.get("ok"):
+            return
+        if t.is_alive():
+            last_exc = TimeoutError(
+                f"upload of {path_in_repo} stalled > {timeout_s}s "
+                f"(attempt {attempt}/{max_attempts})"
+            )
+            # Thread is daemon; let it die with the process. We move on.
+        else:
+            last_exc = result.get("exc") or RuntimeError("unknown upload failure")
+        backoff = min(30, 5 * attempt)
+        print(f"    !! upload retry {attempt}/{max_attempts} for {path_in_repo}: "
+              f"{last_exc}; sleeping {backoff}s")
+        time.sleep(backoff)
+    raise last_exc  # type: ignore[misc]
+
+
 def upload_shard(repo_id: str, out_dir: Path, entry: dict, hf_write_token: str):
-    """Push a single shard file + manifest to the HF dataset repo."""
+    """Push a single shard file + manifest to the HF dataset repo.
+
+    Each upload is wrapped in a thread with a 5 min timeout and 4 retries so
+    a silent socket stall can't block the run forever. On permanent failure we
+    log and continue -- resume will re-detect the missing shard next run.
+    """
     try:
         from huggingface_hub import HfApi
         api = HfApi(token=hf_write_token)
-        api.upload_file(
+        _upload_with_retry(
+            api,
             path_or_fileobj=out_dir / entry["file"],
             path_in_repo=f"data/{entry['file']}",
-            repo_id=repo_id, repo_type="dataset",
+            repo_id=repo_id,
             commit_message=f"add {entry['file']} ({entry['rows']} rows, {entry['tokens']} toks)",
         )
-        api.upload_file(
+        _upload_with_retry(
+            api,
             path_or_fileobj=out_dir / "manifest.json",
             path_in_repo="manifest.json",
-            repo_id=repo_id, repo_type="dataset",
+            repo_id=repo_id,
             commit_message=f"manifest after {entry['file']}",
         )
         print(f"    uploaded {entry['file']} -> {repo_id}")

@@ -15,7 +15,12 @@ set -euo pipefail
 : "${OUT_DIR:=/workspace/darija_out}"
 
 export HUGGINGFACE_HUB_TOKEN="${HF_TOKEN}"
-export HF_HUB_ENABLE_HF_TRANSFER=1
+# NOTE: hf_transfer hung on shard_00198 with a silent 0 B/s stall. The
+# upload_shard() helper now has its own thread-based timeout + retry, but
+# we also disable hf_transfer here so the underlying requests client can
+# honour HF_HUB_DOWNLOAD_TIMEOUT and fail fast instead of spinning forever.
+export HF_HUB_ENABLE_HF_TRANSFER=0
+export HF_HUB_DOWNLOAD_TIMEOUT=60
 export PYTHONUNBUFFERED=1
 
 # 1. deps (only installs if missing) ---------------------------------------
