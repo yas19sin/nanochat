@@ -17,3 +17,7 @@ Attention-Residuals/
 TinyEngram/
 smoke_mixed.log
 ablation_results_5090/wandb_offline/
+
+# Local logs
+*.log
+!wandb/*.log

@@ -1,0 +1,17 @@
+{
+  "direction": "🇬🇧 English → 🇲🇦 Darija",
+  "n_per_subset": 1,
+  "subsets": {
+    "faq": [
+      {
+        "id": "<urn:uuid:1934515f-66ac-43a4-9841-a4ed1e48f946>",
+        "src_en": "bottom leaves of plants are dying (pics)help\nDoes anybody know what causes this to happen(see pics).I have them on the bottom of 8 of my 10 tomato plants.And is there a way to fix or are all my plants going to die.I also put a pic of the top of the plants were the leaves appear to be fine.Any help would be appreciated as this is my first year of gardening.Thanks in advance.\nYellowing Leaves on Tomato Plants\nIt could be any number of things.\nFirst, as the plants mature, it's not uncommon for the bottom leaves to yellow due to lack of nutrients from the soil, that the weather is really hot, or even lack of light (the top leaves are shading out the bottom leaves). It's ok to pinch them off. And, don't worry about all the plants dying quite yet.\nNext, do a soil test. It could be a lack of nitr",
+        "src_darija": "الوراق ديال الطماطم من التحت بداو كيصفروا (صور)\nواش كاين شي حد عارف شنو اللي كيسبب هادشي (شوف الصور). عندي 8 من 10 ديال النبتات ديال الطماطم فيهم هاد المشكل. واش كاين شي حل باش نصلح هادشي ولا النبتات ديالي كاملين غادي يموتو. وزدت صورة ديال الفوق فين كيبانو الوراق مزيانين. أي مساعدة غادي تكون مزيانة، حيت هادي أول مرة كنبدا فيها الغرس. شكراً بزاف.",
+        "src_time_s": 15.14,
+        "gen_en": "Topical FAQ for a First-Year Gardener\n\nQ: What is causing the yellowing leaves on my tomato plants?\nA: The plants are developing yellow leaves as they mature and mature.\n\nQ: Is this a sign of a disease or nutrient deficiency?\nA: The yellowing may be due to a lack of essential nutrients in the soil, excessive heat, or insufficient light causing the top leaves to shade the lower leaves.\n\nQ: What can I do to fix this issue?\nA: Test the soil to confirm if there's a lack of nitrogen. If so, consider adding organic fertilizers to enrich the soil. For now, you may want to keep pinching off the yellowing leaves to prevent additional stress to the plant.\n\nQ: How can I identify if this is due to a disease or nutrient deficiency?\nA: Test soil for nutrient deficiencies with your local extension servic",
+        "gen_darija": "أسئلة شائعة للمبتدئين في البستنة\n\nس: شنو السبب ديال الصفار اللي فوراق الطماطم ديالي؟\nج: النباتات بدات كتصفر ملي كتكبر.\n\nس: واش هادي علامة ديال شي مرض ولا نقص فالتغذية؟\nج: الصفار يقدر يكون بسباب نقص فالمواد المغذية في التربة، الحرارة المجهدة، ولا الضوء ما كافيش اللي كيخلي الوراق الفوق يغطيو على اللي لتحت.\n\nس: شنو نقدر ندير باش نحل هاد المشكل؟\nج: جرب تحلل التربة باش تعرف واش ناقص فيها النيتروجين. إلا كان، فكر تزيد الأسمدة العضوية باش تغني التربة. وباش ما تزيدش تضغط على النبات، حاول تحيد الوراق الصفرين.\n\nس: كيفاش نعرف واش هادشي بسباب مرض ولا نقص فالتغذية؟\nج: حلل التربة باش تعرف واش ناقص فيها شي مادة مغذية مع المركز الجهوي ديال الزراعة.",
+        "gen_time_s": 13.09
+      }
+    ]
+  }
+}
