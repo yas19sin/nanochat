@@ -4,7 +4,8 @@ Scratch folder for the Darija structured-data translation pipeline (code / toolc
 
 ## Scripts
 
-- `translate_structured.py` — main pipeline. Per-domain processors: segment-based for code, per-turn for toolcall, placeholder-based for math. CLI: `--domain {code,toolcall,math,all} --n N --provider {lmstudio,deepseek}`.
+- `translate_structured.py` — local/HTTP pipeline (LM Studio / DeepSeek). Used for n=20/n=100 quality validation. CLI: `--domain {code,toolcall,math,all} --n N --provider {lmstudio,deepseek}`.
+- `translate_structured_vllm.py` — **production batched-vLLM pipeline** for Vast/RunPod GPU. Reuses extractors/restitch/verify from `translate_structured.py` but flattens jobs across a batch of samples into one `llm.generate()` call to keep the GPU saturated. Resumable via per-domain manifests, uploads parquet shards to HF as it goes (same pattern as `scripts/translate_vllm_darija.py`).
 - `verify_toolcall_compat.py` — sends Hermes-FC tool specs to a real tool-calling model (lfm2.5-350m) and compares emitted `tool_calls` against the dataset's ground-truth. Confirms the dataset's `<tool_call>` schema matches the OpenAI standard.
 - `probe_domain_translate.py`, `probe_deepseek_toolcall.py` — earlier exploratory probes.
 - `inspect_datasets.py` — quick dataset column/sample inspection.
