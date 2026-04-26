@@ -126,41 +126,113 @@ def _plan_prose_segment(prose: str, sample_id: int, seg_id: int, domain: str) ->
     )
 
 
+def _append_translation_job(sp: SamplePlan, prose: str) -> None:
+    if prose.strip():
+        seg_id = len(sp.plan)
+        sp.jobs.append(_plan_prose_segment(prose, sp.sample_id, seg_id, "code"))
+        sp.plan.append(("job", seg_id))
+    elif prose:
+        sp.plan.append(("lit", prose))
+
+
+_CODE_KEYWORD_RE = re.compile(
+    r"^(?:async\s+def|def|class|for|while|if|elif|else|try|except|finally|with)\b.*:\s*(?:#.*)?$"
+)
+_CODE_STMT_RE = re.compile(
+    r"^(?:return|yield|break|continue|pass|import|from|print|assert|raise)\b"
+)
+_CODE_ASSIGN_RE = re.compile(
+    r"^[A-Za-z_]\w*(?:\[[^\]]+\]|\.[A-Za-z_]\w*)?\s*(?:=|\+=|-=|\*=|/=|//=|%=)"
+)
+_CODE_CALL_RE = re.compile(
+    r"^[a-z_]\w*(?:\.[a-z_]\w*)?\s*\([^)]*\)\s*(?:#.*)?$"
+)
+
+
+def _unfenced_code_score(line: str) -> int:
+    """Return a heuristic code-likeness score for a non-fenced line."""
+    s = line.strip()
+    if not s or s.startswith("### "):
+        return 0
+    if s.startswith("#"):
+        return 2
+    if _CODE_KEYWORD_RE.match(s):
+        return 3
+    if _CODE_STMT_RE.match(s):
+        return 3
+    if _CODE_ASSIGN_RE.match(s):
+        return 3
+    if _CODE_CALL_RE.match(s):
+        return 2
+    if re.match(r"^[\[\{\(].*[\]\}\),]\s*$", s):
+        return 2
+    if re.match(r"^[\]\}\)],;]+$", s):
+        return 1
+    if line[:1].isspace() and re.search(r"[=(){}\[\]:]", s):
+        return 2
+    return 0
+
+
+def _should_keep_unfenced_code(lines: list[str]) -> bool:
+    scores = [_unfenced_code_score(line) for line in lines if line.strip()]
+    if not scores:
+        return False
+    strong = sum(score >= 2 for score in scores)
+    if len(scores) == 1:
+        line = next(line.strip() for line in lines if line.strip())
+        return scores[0] >= 3 or line.startswith("#") or _CODE_CALL_RE.match(line) is not None
+    return strong >= 2 and strong / len(scores) >= 0.5
+
+
 def _append_code_prose_units(sp: SamplePlan, prose: str) -> None:
     """Split code-domain prose into small units before translation.
 
     CodeFeedback rows are rendered as "### Question" + prose + "### Answer" +
-    prose/code/prose. If we translate the whole pre-code blob as one job, small
-    models can drop the question while still preserving code fences. Keeping
-    headings/blank lines literal and translating each paragraph separately makes
-    omissions much easier to catch and retry.
+    prose/code/prose. The source also contains some long Python snippets that
+    are not fenced. Small translation models mangle those if they see them as
+    prose, so protect obvious raw code runs as literals too.
     """
-    pending: list[str] = []
+    prose_buf: list[str] = []
+    code_buf: list[str] = []
 
-    def flush_pending() -> None:
-        if not pending:
+    def flush_prose() -> None:
+        if not prose_buf:
             return
-        chunk = "".join(pending)
-        pending.clear()
-        if chunk.strip():
-            seg_id = len(sp.plan)
-            sp.jobs.append(_plan_prose_segment(chunk, sp.sample_id, seg_id, "code"))
-            sp.plan.append(("job", seg_id))
-        else:
+        _append_translation_job(sp, "".join(prose_buf))
+        prose_buf.clear()
+
+    def flush_code() -> None:
+        if not code_buf:
+            return
+        chunk = "".join(code_buf)
+        if _should_keep_unfenced_code(code_buf):
+            flush_prose()
             sp.plan.append(("lit", chunk))
+        else:
+            prose_buf.extend(code_buf)
+        code_buf.clear()
 
     for line in prose.splitlines(keepends=True):
         stripped = line.strip()
         if not stripped:
-            flush_pending()
+            flush_code()
+            flush_prose()
             sp.plan.append(("lit", line))
             continue
         if stripped.startswith("### "):
-            flush_pending()
+            flush_code()
+            flush_prose()
             sp.plan.append(("lit", line))
             continue
-        pending.append(line)
-    flush_pending()
+        if _unfenced_code_score(line) > 0:
+            flush_prose()
+            code_buf.append(line)
+        else:
+            flush_code()
+            prose_buf.append(line)
+
+    flush_code()
+    flush_prose()
 
 
 def plan_code(sample_id: int, text: str) -> SamplePlan:
