@@ -35,15 +35,29 @@ from translate_structured_vllm import (  # noqa: E402
 
 
 _LINE_WS_RE = re.compile(r"\s+")
+_HAS_ARABIC_RE = re.compile(r"[\u0600-\u06FF]")
+_CODEISH_LINE_RE = re.compile(
+    r"^\s*(?:return|if|for|while|def|class|import|from|print|else|elif|try|except|"
+    r"finally|with|assert|raise|break|continue|pass|[A-Za-z_]\w*\s*[=({\[])"
+)
 
 
-def repeated_line_issue(text: str) -> str | None:
-    lines = [_LINE_WS_RE.sub(" ", line.strip()) for line in text.splitlines()]
-    lines = [line for line in lines if len(line) >= 12]
-    if not lines:
+def repeated_line_issue(source: str, target: str) -> str | None:
+    source_lines = [_LINE_WS_RE.sub(" ", line.strip()) for line in source.splitlines()]
+    source_counts = Counter(line for line in source_lines if line)
+
+    target_lines = [_LINE_WS_RE.sub(" ", line.strip()) for line in target.splitlines()]
+    target_lines = [
+        line
+        for line in target_lines
+        if len(line) >= 12
+        and not _CODEISH_LINE_RE.match(line)
+        and _HAS_ARABIC_RE.search(line)
+    ]
+    if not target_lines:
         return None
-    line, count = Counter(lines).most_common(1)[0]
-    if count >= 4:
+    line, count = Counter(target_lines).most_common(1)[0]
+    if count >= 4 and count > source_counts.get(line, 0) + 2:
         return f"repeated line {count}x: {line[:90]!r}"
     return None
 
@@ -57,6 +71,9 @@ def percentile(values: list[float], pct: float) -> float:
 
 
 def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+
     p = argparse.ArgumentParser()
     p.add_argument("--repo-id", default="Lyte/darija-structured-translated")
     p.add_argument("--split", default="train")
@@ -76,6 +93,7 @@ def main() -> None:
 
     by_domain: Counter[str] = Counter()
     issue_counts: Counter[str] = Counter()
+    issue_rows = 0
     src_by_domain: dict[str, list[int]] = defaultdict(list)
     ratio_by_domain: dict[str, list[float]] = defaultdict(list)
     dr_len_by_domain: dict[str, list[int]] = defaultdict(list)
@@ -107,7 +125,7 @@ def main() -> None:
         if domain == "code":
             errs.extend(_verify_unfenced_code_spans(en, dr))
 
-        rep_line = repeated_line_issue(dr)
+        rep_line = repeated_line_issue(en, dr)
         if rep_line:
             errs.append(rep_line)
 
@@ -123,6 +141,7 @@ def main() -> None:
         if not errs:
             continue
 
+        issue_rows += 1
         for err in errs:
             issue_counts[err.split(":")[0]] += 1
         rec = {
@@ -168,7 +187,7 @@ def main() -> None:
             for d, v in dr_len_by_domain.items()
             if v
         },
-        "issue_rows": sum(issue_counts.values()),
+        "issue_rows": issue_rows,
         "issue_counts": dict(issue_counts.most_common(12)),
         "sample_issues": sample_issues,
         "issues_out": str(issues_out) if issues_out else None,
