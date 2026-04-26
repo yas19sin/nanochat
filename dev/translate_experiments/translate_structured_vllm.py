@@ -128,12 +128,38 @@ def _plan_prose_segment(prose: str, sample_id: int, seg_id: int, domain: str) ->
 
 
 def _append_translation_job(sp: SamplePlan, prose: str) -> None:
-    if prose.strip():
+    """Append code-domain prose, preserving inline `code` as literals.
+
+    Earlier versions masked inline backtick spans as §P...§ placeholders. That
+    was structurally safe when copied, but small models sometimes dropped even a
+    single placeholder and caused otherwise-good rows to be rejected. Since this
+    is the code domain, inline backtick spans are safer as verbatim literals.
+    """
+    if not prose:
+        return
+    if not prose.strip():
+        sp.plan.append(("lit", prose))
+        return
+
+    last_end = 0
+    saw_inline = False
+    for m in INLINE_CODE_RE.finditer(prose):
+        saw_inline = True
+        before = prose[last_end:m.start()]
+        if before:
+            _append_translation_job(sp, before)
+        sp.plan.append(("lit", m.group(0)))
+        last_end = m.end()
+
+    if not saw_inline:
         seg_id = len(sp.plan)
         sp.jobs.append(_plan_prose_segment(prose, sp.sample_id, seg_id, "code"))
         sp.plan.append(("job", seg_id))
-    elif prose:
-        sp.plan.append(("lit", prose))
+        return
+
+    tail = prose[last_end:]
+    if tail:
+        _append_translation_job(sp, tail)
 
 
 _CODE_KEYWORD_RE = re.compile(
