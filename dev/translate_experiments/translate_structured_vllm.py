@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -125,28 +126,55 @@ def _plan_prose_segment(prose: str, sample_id: int, seg_id: int, domain: str) ->
     )
 
 
+def _append_code_prose_units(sp: SamplePlan, prose: str) -> None:
+    """Split code-domain prose into small units before translation.
+
+    CodeFeedback rows are rendered as "### Question" + prose + "### Answer" +
+    prose/code/prose. If we translate the whole pre-code blob as one job, small
+    models can drop the question while still preserving code fences. Keeping
+    headings/blank lines literal and translating each paragraph separately makes
+    omissions much easier to catch and retry.
+    """
+    pending: list[str] = []
+
+    def flush_pending() -> None:
+        if not pending:
+            return
+        chunk = "".join(pending)
+        pending.clear()
+        if chunk.strip():
+            seg_id = len(sp.plan)
+            sp.jobs.append(_plan_prose_segment(chunk, sp.sample_id, seg_id, "code"))
+            sp.plan.append(("job", seg_id))
+        else:
+            sp.plan.append(("lit", chunk))
+
+    for line in prose.splitlines(keepends=True):
+        stripped = line.strip()
+        if not stripped:
+            flush_pending()
+            sp.plan.append(("lit", line))
+            continue
+        if stripped.startswith("### "):
+            flush_pending()
+            sp.plan.append(("lit", line))
+            continue
+        pending.append(line)
+    flush_pending()
+
+
 def plan_code(sample_id: int, text: str) -> SamplePlan:
     sp = SamplePlan(sample_id=sample_id, en=text, domain="code")
     last_end = 0
     for m in FENCED_RE.finditer(text):
         if m.start() > last_end:
             prose = text[last_end:m.start()]
-            if prose.strip():
-                seg_id = len(sp.plan)
-                sp.jobs.append(_plan_prose_segment(prose, sample_id, seg_id, "code"))
-                sp.plan.append(("job", seg_id))
-            else:
-                sp.plan.append(("lit", prose))
+            _append_code_prose_units(sp, prose)
         sp.plan.append(("lit", m.group(0)))
         last_end = m.end()
     if last_end < len(text):
         prose = text[last_end:]
-        if prose.strip():
-            seg_id = len(sp.plan)
-            sp.jobs.append(_plan_prose_segment(prose, sample_id, seg_id, "code"))
-            sp.plan.append(("job", seg_id))
-        else:
-            sp.plan.append(("lit", prose))
+        _append_code_prose_units(sp, prose)
     return sp
 
 
@@ -250,8 +278,36 @@ def build_prompt(tokenizer, user_text: str, kind: str) -> str:
 # ----------------------------------------------------------------------
 def _clean_prose_output(txt: str) -> str:
     """Strip stray ``` fences the model may emit on prose-only segments."""
-    import re
     return re.sub(r"```[^\n`]*", "", txt).replace("```", "")
+
+
+_WORD_RE = re.compile(r"[A-Za-z0-9_\u0600-\u06FF]+")
+
+
+def _completeness_errors(job: Job, restitched: str) -> list[str]:
+    """Catch severe prose omissions that structural checks cannot see."""
+    if job.domain != "code":
+        return []
+
+    src = job.original_text.strip()
+    out = restitched.strip()
+    if len(src) < 180:
+        return []
+
+    src_words = _WORD_RE.findall(src)
+    out_words = _WORD_RE.findall(out)
+    if len(src_words) < 25:
+        return []
+
+    char_ratio = len(out) / max(len(src), 1)
+    word_ratio = len(out_words) / max(len(src_words), 1)
+    if char_ratio < 0.50 and word_ratio < 0.65:
+        return [
+            "possible prose omission: "
+            f"chars {len(out)}/{len(src)} ({char_ratio:.2f}), "
+            f"words {len(out_words)}/{len(src_words)} ({word_ratio:.2f})"
+        ]
+    return []
 
 
 def run_jobs_pass(llm, sampling_params, tokenizer, jobs: list[Job], kind: str) -> None:
@@ -276,6 +332,7 @@ def run_jobs_pass(llm, sampling_params, tokenizer, jobs: list[Job], kind: str) -
             restitched, errs = text, []
 
         struct_errs = verify_structures(j.original_text, restitched, j.domain)
+        struct_errs += _completeness_errors(j, restitched)
         all_errs = errs + struct_errs
 
         # Only replace if this pass has fewer errors than what we already stored
