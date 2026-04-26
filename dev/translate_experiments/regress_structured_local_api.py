@@ -39,6 +39,7 @@ from translate_structured_vllm import (  # noqa: E402
     SamplePlan,
     _clean_prose_output,
     _completeness_errors,
+    _repetition_errors,
     _verify_unfenced_code_spans,
     assemble_sample,
 )
@@ -105,6 +106,7 @@ def run_job(
 
     all_errs = errs + verify_structures(job.original_text, restitched, job.domain)
     all_errs += _completeness_errors(job, restitched)
+    all_errs += _repetition_errors(job, restitched)
 
     if kind == "default" or len(all_errs) < len(job.errors):
         job.result = restitched

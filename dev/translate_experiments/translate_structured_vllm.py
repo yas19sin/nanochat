@@ -499,6 +499,55 @@ def _completeness_errors(job: Job, restitched: str) -> list[str]:
     return []
 
 
+def _repetition_errors(job: Job, restitched: str) -> list[str]:
+    """Catch model loops in translated prose jobs.
+
+    This runs on job outputs, not on final samples, so verbatim literals such
+    as code blocks, tool-call JSON, and math value lines are not penalized.
+    """
+    src = job.original_text.strip()
+    out = restitched.strip()
+    if len(out) < 180:
+        return []
+
+    errs: list[str] = []
+    if len(src) >= 40 and len(out) > max(900, len(src) * 2.8):
+        errs.append(f"output too long vs source: out={len(out)} src={len(src)}")
+
+    lines = [re.sub(r"\s+", " ", line.strip()) for line in out.splitlines()]
+    lines = [line for line in lines if len(line) >= 12]
+    if lines:
+        line_counts = Counter(lines)
+        line, count = line_counts.most_common(1)[0]
+        if count >= 4:
+            errs.append(f"repeated line {count}x: {line[:80]!r}")
+
+        run_line = None
+        run_count = 0
+        for line in lines:
+            if line == run_line:
+                run_count += 1
+            else:
+                run_line = line
+                run_count = 1
+            if run_count >= 3:
+                errs.append(f"consecutive repeated line {run_count}x: {line[:80]!r}")
+                break
+
+    tokens = _WORD_RE.findall(out.lower())
+    if len(tokens) >= 80:
+        for n in (5, 8, 12):
+            ngrams = [" ".join(tokens[i:i + n]) for i in range(len(tokens) - n + 1)]
+            if not ngrams:
+                continue
+            phrase, count = Counter(ngrams).most_common(1)[0]
+            if count >= 6:
+                errs.append(f"repeated {n}-gram {count}x: {phrase[:80]!r}")
+                break
+
+    return errs
+
+
 def run_jobs_pass(llm, sampling_params, tokenizer, jobs: list[Job], kind: str) -> None:
     """Run one batched generation pass over `jobs`, updating each job in place."""
     if not jobs:
@@ -522,6 +571,7 @@ def run_jobs_pass(llm, sampling_params, tokenizer, jobs: list[Job], kind: str) -
 
         struct_errs = verify_structures(j.original_text, restitched, j.domain)
         struct_errs += _completeness_errors(j, restitched)
+        struct_errs += _repetition_errors(j, restitched)
         all_errs = errs + struct_errs
 
         # Only replace if this pass has fewer errors than what we already stored
