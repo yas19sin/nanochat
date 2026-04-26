@@ -45,6 +45,7 @@ import re
 import signal
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -692,6 +693,7 @@ def process_domain(
     hf_write_token: str,
     stop_flag: dict,
     progress_every: int,
+    reject_sample_rows: int,
 ) -> None:
     dm = manifest["per_domain"][domain]
     rows_already = dm["rows_accepted"]
@@ -726,6 +728,31 @@ def process_domain(
     t_loop = time.time()
     batches_done = 0
     drops_total = 0
+    drop_reasons: Counter[str] = Counter()
+    reject_samples_written = 0
+
+    def note_reject(sp: SamplePlan, src_idx: int) -> None:
+        nonlocal reject_samples_written
+        reason = sp.structure_errs[0] if sp.structure_errs else "unknown"
+        if len(reason) > 180:
+            reason = reason[:177] + "..."
+        drop_reasons[reason] += 1
+
+        if reject_samples_written >= reject_sample_rows:
+            return
+        sub = out_dir / domain
+        sub.mkdir(parents=True, exist_ok=True)
+        rpath = sub / f"{domain}_reject_samples.jsonl"
+        rec = {
+            "src_idx": src_idx,
+            "domain": domain,
+            "errors": sp.structure_errs,
+            "en": sp.en,
+            "dr": sp.dr,
+        }
+        with rpath.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        reject_samples_written += 1
 
     def flush_shard(final: bool = False) -> None:
         nonlocal shard_idx
@@ -774,9 +801,10 @@ def process_domain(
         kept = 0
         for sp in plans:
             assemble_sample(sp)
+            src_idx = skip + (idx - len(wave)) + sp.sample_id
             if sp.ok:
                 shard_buffer.append({
-                    "src_idx": skip + (idx - len(wave)) + sp.sample_id,
+                    "src_idx": src_idx,
                     "domain": domain,
                     "en": sp.en,
                     "dr": sp.dr,
@@ -787,6 +815,7 @@ def process_domain(
                     break
             else:
                 drops_total += 1
+                note_reject(sp, src_idx)
 
         batches_done += 1
         if batches_done % progress_every == 0:
@@ -800,6 +829,12 @@ def process_domain(
                   f"rows/s={rps:.1f}  "
                   f"eta={eta_s/3600:.1f}h  "
                   f"buf={len(shard_buffer)}/{shard_rows}")
+            if drop_reasons:
+                top = "; ".join(
+                    f"{count}x {reason}"
+                    for reason, count in drop_reasons.most_common(3)
+                )
+                print(f"    top_drop_reasons: {top}")
 
         if len(shard_buffer) >= shard_rows:
             flush_shard()
@@ -809,6 +844,11 @@ def process_domain(
     elapsed = time.time() - t_loop
     print(f"[{domain}] done: kept={rows_accepted}/{target_rows}  "
           f"drops={drops_total}  elapsed={elapsed/60:.1f} min")
+    if drop_reasons:
+        top = "; ".join(
+            f"{count}x {reason}" for reason, count in drop_reasons.most_common(8)
+        )
+        print(f"[{domain}] top drop reasons: {top}")
 
 
 # ----------------------------------------------------------------------
@@ -833,6 +873,8 @@ def main() -> None:
     p.add_argument("--out-dir", required=True)
     p.add_argument("--repo-id", default=None)
     p.add_argument("--progress-every", type=int, default=1)
+    p.add_argument("--reject-sample-rows", type=int, default=200,
+                   help="per-domain failed rows to save under OUT_DIR/<domain>/*_reject_samples.jsonl")
     args = p.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -909,6 +951,7 @@ def main() -> None:
             hf_write_token=hf_write_token,
             stop_flag=stop_flag,
             progress_every=args.progress_every,
+            reject_sample_rows=args.reject_sample_rows,
         )
 
 

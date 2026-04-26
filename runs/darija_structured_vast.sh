@@ -26,6 +26,7 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-1024}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"
 SHARD_ROWS="${SHARD_ROWS:-2000}"
+REJECT_SAMPLE_ROWS="${REJECT_SAMPLE_ROWS:-200}"
 ENFORCE_EAGER="${ENFORCE_EAGER:-0}"
 ATTENTION_BACKEND="${ATTENTION_BACKEND:-}"
 
@@ -34,6 +35,7 @@ mkdir -p "$OUT_DIR"
 echo "[darija-struct] out=$OUT_DIR  repo=$REPO_ID"
 echo "[darija-struct] targets: code=$N_CODE  toolcall=$N_TOOLCALL  math=$N_MATH"
 echo "[darija-struct] batch_size=$BATCH_SIZE  max_model_len=$MAX_MODEL_LEN  enforce_eager=$ENFORCE_EAGER  backend=${ATTENTION_BACKEND:-default}"
+echo "[darija-struct] reject_sample_rows=$REJECT_SAMPLE_ROWS"
 
 EXTRA_ARGS=()
 if [ "$ENFORCE_EAGER" = "1" ]; then
@@ -54,6 +56,7 @@ python -m dev.translate_experiments.translate_structured_vllm \
     --max-model-len "$MAX_MODEL_LEN" \
     --gpu-mem-util "$GPU_MEM_UTIL" \
     --shard-rows "$SHARD_ROWS" \
+    --reject-sample-rows "$REJECT_SAMPLE_ROWS" \
     --out-dir "$OUT_DIR" \
     --repo-id "$REPO_ID" \
     "${EXTRA_ARGS[@]}"
