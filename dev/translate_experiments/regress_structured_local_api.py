@@ -39,6 +39,7 @@ from translate_structured_vllm import (  # noqa: E402
     SamplePlan,
     _clean_prose_output,
     _completeness_errors,
+    _job_max_tokens,
     _repetition_errors,
     _verify_unfenced_code_spans,
     assemble_sample,
@@ -88,7 +89,7 @@ def run_job(
         ],
         temperature=0.3,
         top_p=0.98,
-        max_tokens=max_tokens,
+        max_tokens=_job_max_tokens(job, max_tokens),
         extra_body={
             "top_k": 300,
             "repetition_penalty": 1.15,

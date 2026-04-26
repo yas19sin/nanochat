@@ -574,18 +574,51 @@ def _repetition_errors(job: Job, restitched: str) -> list[str]:
     return errs
 
 
+def _job_max_tokens(job: Job, default_max_tokens: int) -> int:
+    """Bound short prose jobs so model loops cannot run for 1k tokens."""
+    src_len = len(job.masked.strip())
+    if src_len <= 80:
+        cap = 64
+    elif src_len <= 160:
+        cap = 96
+    elif src_len <= 320:
+        cap = 160
+    elif src_len <= 700:
+        cap = 256
+    elif src_len <= 1200:
+        cap = 512
+    else:
+        cap = default_max_tokens
+    return max(32, min(default_max_tokens, cap))
+
+
 def run_jobs_pass(llm, sampling_params, tokenizer, jobs: list[Job], kind: str) -> None:
     """Run one batched generation pass over `jobs`, updating each job in place."""
     if not jobs:
         return
-    prompts = []
-    for j in jobs:
-        # prose_only jobs stay as prose_only on default pass; everything else uses `kind`
-        prompt_kind = j.prompt_kind if kind == "default" else "strict"
-        prompts.append(build_prompt(tokenizer, j.masked, prompt_kind))
-    outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
 
-    for j, out in zip(jobs, outputs):
+    if isinstance(sampling_params, dict):
+        default_max_tokens = getattr(sampling_params["default"], "max_tokens", 1024)
+    else:
+        default_max_tokens = getattr(sampling_params, "max_tokens", 1024)
+    prompts_by_cap: dict[int, list[tuple[int, str]]] = {}
+    for i, j in enumerate(jobs):
+        prompt_kind = j.prompt_kind if kind == "default" else "strict"
+        cap = _job_max_tokens(j, default_max_tokens)
+        prompts_by_cap.setdefault(cap, []).append((i, build_prompt(tokenizer, j.masked, prompt_kind)))
+
+    outputs_by_idx = {}
+    for cap, indexed_prompts in prompts_by_cap.items():
+        prompts = [prompt for _, prompt in indexed_prompts]
+        params = sampling_params
+        if isinstance(sampling_params, dict):
+            params = sampling_params.get(cap) or sampling_params["default"]
+        outputs = llm.generate(prompts, params, use_tqdm=False)
+        for (idx, _), out in zip(indexed_prompts, outputs):
+            outputs_by_idx[idx] = out
+
+    for i, j in enumerate(jobs):
+        out = outputs_by_idx[i]
         text = out.outputs[0].text.strip()
         if j.prompt_kind == "prose_only" or j.domain == "code":
             text = _clean_prose_output(text)
@@ -982,11 +1015,18 @@ def main() -> None:
         llm_kwargs["attention_backend"] = args.attention_backend
     llm = LLM(**llm_kwargs)
     tokenizer = AutoTokenizer.from_pretrained(args.model, token=hf_token)
-    sampling_params = SamplingParams(
+    sampling_kwargs = dict(
         temperature=0.3, top_p=0.98, top_k=300,
         repetition_penalty=1.15,
-        max_tokens=args.max_new_tokens,
     )
+    caps = sorted({
+        args.max_new_tokens,
+        *[c for c in (64, 96, 160, 256, 512) if c <= args.max_new_tokens],
+    })
+    sampling_params = {
+        "default": SamplingParams(**sampling_kwargs, max_tokens=args.max_new_tokens),
+        **{cap: SamplingParams(**sampling_kwargs, max_tokens=cap) for cap in caps},
+    }
     print(f"[model] ready in {time.time()-t0:.1f}s")
 
     manifest = load_manifest(out_dir)
