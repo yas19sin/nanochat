@@ -184,6 +184,47 @@ def _should_keep_unfenced_code(lines: list[str]) -> bool:
     return strong >= 2 and strong / len(scores) >= 0.5
 
 
+def _unfenced_code_spans(text: str) -> list[str]:
+    """Find raw code-looking spans outside fenced markdown blocks."""
+    spans: list[str] = []
+
+    def scan(prose: str) -> None:
+        code_buf: list[str] = []
+
+        def flush_code() -> None:
+            if not code_buf:
+                return
+            if _should_keep_unfenced_code(code_buf):
+                spans.append("".join(code_buf))
+            code_buf.clear()
+
+        for line in prose.splitlines(keepends=True):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("### "):
+                flush_code()
+                continue
+            if _unfenced_code_score(line) > 0:
+                code_buf.append(line)
+            else:
+                flush_code()
+        flush_code()
+
+    last_end = 0
+    for m in FENCED_RE.finditer(text):
+        scan(text[last_end:m.start()])
+        last_end = m.end()
+    scan(text[last_end:])
+    return spans
+
+
+def _verify_unfenced_code_spans(original_text: str, restitched: str) -> list[str]:
+    missing = [span for span in _unfenced_code_spans(original_text) if span not in restitched]
+    if not missing:
+        return []
+    preview = missing[0].strip().splitlines()[0][:80]
+    return [f"unfenced code span mismatch: missing={len(missing)} first={preview!r}"]
+
+
 def _append_code_prose_units(sp: SamplePlan, prose: str) -> None:
     """Split code-domain prose into small units before translation.
 
@@ -223,6 +264,11 @@ def _append_code_prose_units(sp: SamplePlan, prose: str) -> None:
             flush_code()
             flush_prose()
             sp.plan.append(("lit", line))
+            continue
+        if stripped.startswith(("- ", "* ")) or re.match(r"^\d+\.\s+", stripped):
+            flush_code()
+            flush_prose()
+            _append_translation_job(sp, line)
             continue
         if _unfenced_code_score(line) > 0:
             flush_prose()
@@ -296,23 +342,93 @@ def plan_toolcall(sample_id: int, text: str) -> SamplePlan:
     return sp
 
 
+_MATH_LITERAL_CHARS_RE = re.compile(r"[0-9=+\-*/^|<>()[\]{}.,:%]")
+_MATH_WORD_RE = re.compile(r"[A-Za-z]{4,}")
+_MATH_SIG_NUM_RE = re.compile(r"(?<![A-Za-z_])[-+]?\d{2,}(?:\.\d+)?(?![A-Za-z_])")
+_PURE_PLACEHOLDERS_RE = re.compile(r"^(?:\s*§P\d+§\s*)+$")
+
+
+def _is_math_literal_line(line: str) -> bool:
+    """Keep compact formula/table/value lines verbatim in math examples."""
+    s = line.strip()
+    if not s:
+        return False
+    if (
+        s.startswith(("$$", "$", r"\(", r"\[", r"\begin"))
+        or s.endswith(("$$", "$", r"\)", r"\]"))
+    ):
+        return True
+    if len(_MATH_SIG_NUM_RE.findall(s)) >= 2:
+        return True
+    if len(s) > 180:
+        return False
+    math_chars = len(_MATH_LITERAL_CHARS_RE.findall(s))
+    if math_chars == 0:
+        return False
+    word_count = len(_MATH_WORD_RE.findall(s))
+    math_ratio = math_chars / max(len(s), 1)
+    if word_count <= 1 and math_ratio >= 0.20:
+        return True
+    if word_count <= 3 and math_ratio >= 0.35:
+        return True
+    if re.match(r"^(?:answer|answers|partial answers?|output|calculations?)\s*[:=]", s, re.I):
+        return True
+    return False
+
+
+def _append_math_job(sp: SamplePlan, text: str) -> None:
+    if not text:
+        return
+    if not text.strip():
+        sp.plan.append(("lit", text))
+        return
+    ext = extract_math(text)
+    if ext.originals and _PURE_PLACEHOLDERS_RE.match(ext.masked.strip()):
+        sp.plan.append(("lit", text))
+        return
+
+    seg_id = len(sp.plan)
+    sp.jobs.append(Job(
+        sample_id=sp.sample_id,
+        seg_id=seg_id,
+        masked=ext.masked,
+        originals=ext.originals,
+        original_text=text,
+        domain="math",
+        prompt_kind="default",
+    ))
+    sp.plan.append(("job", seg_id))
+
+
+def _append_math_units(sp: SamplePlan, text: str, max_chars: int = 600) -> None:
+    buf: list[str] = []
+
+    def flush_buf() -> None:
+        if not buf:
+            return
+        _append_math_job(sp, "".join(buf))
+        buf.clear()
+
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if not stripped:
+            flush_buf()
+            sp.plan.append(("lit", line))
+            continue
+        if _is_math_literal_line(line):
+            flush_buf()
+            sp.plan.append(("lit", line))
+            continue
+        if sum(len(x) for x in buf) + len(line) > max_chars:
+            flush_buf()
+        buf.append(line)
+
+    flush_buf()
+
+
 def plan_math(sample_id: int, text: str) -> SamplePlan:
     sp = SamplePlan(sample_id=sample_id, en=text, domain="math")
-    ext = extract_math(text)
-    seg_id = 0
-    if ext.originals:
-        sp.jobs.append(Job(
-            sample_id=sample_id, seg_id=seg_id,
-            masked=ext.masked, originals=ext.originals, original_text=text,
-            domain="math", prompt_kind="default",
-        ))
-    else:
-        sp.jobs.append(Job(
-            sample_id=sample_id, seg_id=seg_id,
-            masked=text, originals=[], original_text=text,
-            domain="math", prompt_kind="default",
-        ))
-    sp.plan.append(("job", seg_id))
+    _append_math_units(sp, text)
     return sp
 
 
@@ -395,7 +511,7 @@ def run_jobs_pass(llm, sampling_params, tokenizer, jobs: list[Job], kind: str) -
 
     for j, out in zip(jobs, outputs):
         text = out.outputs[0].text.strip()
-        if j.prompt_kind == "prose_only":
+        if j.prompt_kind == "prose_only" or j.domain == "code":
             text = _clean_prose_output(text)
 
         if j.originals:
@@ -448,6 +564,8 @@ def assemble_sample(sp: SamplePlan) -> None:
         sp.dr = "".join(parts)
 
     final_errs = verify_structures(sp.en, sp.dr, sp.domain) if not all_errs else []
+    if sp.domain == "code" and not all_errs:
+        final_errs += _verify_unfenced_code_spans(sp.en, sp.dr)
     sp.structure_errs = all_errs + final_errs
     sp.ok = not sp.structure_errs
 
