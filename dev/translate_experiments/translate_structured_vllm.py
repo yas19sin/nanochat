@@ -580,6 +580,8 @@ def main() -> None:
     p.add_argument("--max-model-len", type=int, default=4096)
     p.add_argument("--gpu-mem-util", type=float, default=0.90)
     p.add_argument("--enforce-eager", action="store_true")
+    p.add_argument("--attention-backend", default=None,
+                   help="vLLM attention backend (FLASH_ATTN, FLASHINFER, TRITON_ATTN, FLEX_ATTENTION). None = vLLM default.")
     p.add_argument("--shard-rows", type=int, default=2_000)
     p.add_argument("--out-dir", required=True)
     p.add_argument("--repo-id", default=None)
@@ -603,7 +605,7 @@ def main() -> None:
     t0 = time.time()
     from vllm import LLM, SamplingParams
     from transformers import AutoTokenizer
-    llm = LLM(
+    llm_kwargs = dict(
         model=args.model,
         dtype="bfloat16",
         max_model_len=args.max_model_len,
@@ -611,6 +613,9 @@ def main() -> None:
         enforce_eager=args.enforce_eager,
         trust_remote_code=True,
     )
+    if args.attention_backend:
+        llm_kwargs["attention_backend"] = args.attention_backend
+    llm = LLM(**llm_kwargs)
     tokenizer = AutoTokenizer.from_pretrained(args.model, token=hf_token)
     sampling_params = SamplingParams(
         temperature=0.3, top_p=0.98, top_k=300,
