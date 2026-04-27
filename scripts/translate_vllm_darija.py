@@ -114,47 +114,85 @@ def write_shard(out_dir: Path, shard_idx: int, rows: list) -> dict:
     return {"file": fname, "rows": len(rows), "tokens": tokens}
 
 
-def _upload_with_retry(api, *, path_or_fileobj, path_in_repo, repo_id,
+def _upload_file_worker(queue, hf_write_token: str, path_or_fileobj: str,
+                        path_in_repo: str, repo_id: str,
+                        commit_message: str):
+    """Run one Hub upload in a child process.
+
+    The parent may kill this process on timeout. Keep this function top-level so
+    multiprocessing "spawn" can import it safely after CUDA/vLLM is initialized.
+    """
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=hf_write_token)
+        api.upload_file(
+            path_or_fileobj=path_or_fileobj,
+            path_in_repo=path_in_repo,
+            repo_id=repo_id,
+            repo_type="dataset",
+            commit_message=commit_message,
+        )
+        queue.put({"ok": True})
+    except BaseException as exc:  # pragma: no cover - network paths
+        queue.put({"err": repr(exc)})
+
+
+def _upload_with_retry(*, hf_write_token, path_or_fileobj, path_in_repo, repo_id,
                        commit_message, max_attempts: int = 4,
                        timeout_s: int = 300):
     """Upload a single file with bounded retries and a hard wall-clock timeout.
 
-    Uses a background thread so a stuck TCP socket (the hf_transfer hang we saw
-    on shard_00198) can't block forever. If a worker times out we abandon it
-    and retry with a fresh HfApi call.
+    Uses a child process so a stuck TCP socket (the hf_transfer hang we saw on
+    shard_00198) cannot outlive the retry attempt or crash Python shutdown.
     """
-    import threading
-    from huggingface_hub import HfApi  # noqa: F401  (api is already an HfApi)
+    import multiprocessing as mp
 
     last_exc: Exception | None = None
+    path_str = os.fspath(path_or_fileobj)
+    ctx = mp.get_context("spawn")
     for attempt in range(1, max_attempts + 1):
-        result: dict = {}
-
-        def _work():
-            try:
-                api.upload_file(
-                    path_or_fileobj=path_or_fileobj,
-                    path_in_repo=path_in_repo,
-                    repo_id=repo_id, repo_type="dataset",
-                    commit_message=commit_message,
-                )
-                result["ok"] = True
-            except Exception as exc:  # pragma: no cover - network paths
-                result["exc"] = exc
-
-        t = threading.Thread(target=_work, daemon=True)
-        t.start()
-        t.join(timeout_s)
-        if result.get("ok"):
-            return
-        if t.is_alive():
+        queue = ctx.Queue()
+        proc = ctx.Process(
+            target=_upload_file_worker,
+            args=(
+                queue,
+                hf_write_token,
+                path_str,
+                path_in_repo,
+                repo_id,
+                commit_message,
+            ),
+        )
+        proc.start()
+        proc.join(timeout_s)
+        if proc.is_alive():
             last_exc = TimeoutError(
                 f"upload of {path_in_repo} stalled > {timeout_s}s "
                 f"(attempt {attempt}/{max_attempts})"
             )
-            # Thread is daemon; let it die with the process. We move on.
+            proc.terminate()
+            proc.join(10)
+            if proc.is_alive():
+                proc.kill()
+                proc.join()
         else:
-            last_exc = result.get("exc") or RuntimeError("unknown upload failure")
+            try:
+                result = queue.get(timeout=1)
+            except Exception:
+                result = {}
+            if result.get("ok"):
+                queue.close()
+                queue.join_thread()
+                return
+            err = result.get("err")
+            if err:
+                last_exc = RuntimeError(err)
+            else:
+                last_exc = RuntimeError(
+                    f"upload worker exited {proc.exitcode} without success"
+                )
+        queue.close()
+        queue.join_thread()
         backoff = min(30, 5 * attempt)
         print(f"    !! upload retry {attempt}/{max_attempts} for {path_in_repo}: "
               f"{last_exc}; sleeping {backoff}s")
@@ -165,22 +203,20 @@ def _upload_with_retry(api, *, path_or_fileobj, path_in_repo, repo_id,
 def upload_shard(repo_id: str, out_dir: Path, entry: dict, hf_write_token: str):
     """Push a single shard file + manifest to the HF dataset repo.
 
-    Each upload is wrapped in a thread with a 5 min timeout and 4 retries so
-    a silent socket stall can't block the run forever. On permanent failure we
-    log and continue -- resume will re-detect the missing shard next run.
+    Each upload is wrapped in a child process with a 5 min timeout and 4
+    retries so a silent socket stall can't block the run forever. On permanent
+    failure we log and continue; resume sync will retry missing Hub files.
     """
     try:
-        from huggingface_hub import HfApi
-        api = HfApi(token=hf_write_token)
         _upload_with_retry(
-            api,
+            hf_write_token=hf_write_token,
             path_or_fileobj=out_dir / entry["file"],
             path_in_repo=f"data/{entry['file']}",
             repo_id=repo_id,
             commit_message=f"add {entry['file']} ({entry['rows']} rows, {entry['tokens']} toks)",
         )
         _upload_with_retry(
-            api,
+            hf_write_token=hf_write_token,
             path_or_fileobj=out_dir / "manifest.json",
             path_in_repo="manifest.json",
             repo_id=repo_id,
@@ -196,6 +232,48 @@ def ensure_repo(repo_id: str, hf_write_token: str):
     api = HfApi(token=hf_write_token)
     api.create_repo(repo_id=repo_id, repo_type="dataset",
                     exist_ok=True, private=False)
+
+
+def sync_manifest_shards(repo_id: str, out_dir: Path, manifest: dict,
+                         hf_write_token: str):
+    """Upload local manifest shards that are missing from the Hub repo."""
+    shards = manifest.get("shards") or []
+    if not shards:
+        return
+
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=hf_write_token)
+        remote_files = set(api.list_repo_files(repo_id=repo_id,
+                                               repo_type="dataset"))
+    except Exception as exc:
+        print(f"[hub] could not list repo files for sync ({exc}); continuing")
+        return
+
+    missing = [
+        entry for entry in shards
+        if f"data/{entry['file']}" not in remote_files
+    ]
+    if not missing:
+        print("[hub] all manifest shards are present on the Hub")
+        if "manifest.json" not in remote_files:
+            print("[hub] manifest.json missing on Hub; uploading local manifest")
+            _upload_with_retry(
+                hf_write_token=hf_write_token,
+                path_or_fileobj=out_dir / "manifest.json",
+                path_in_repo="manifest.json",
+                repo_id=repo_id,
+                commit_message="sync manifest",
+            )
+        return
+
+    print(f"[hub] found {len(missing)} manifest shard(s) missing on Hub; syncing")
+    for entry in missing:
+        local_path = out_dir / entry["file"]
+        if not local_path.exists():
+            print(f"    !! missing local shard {local_path}; cannot upload")
+            continue
+        upload_shard(repo_id, out_dir, entry, hf_write_token)
 
 
 # ------------------------------------------------------------------ main
@@ -236,6 +314,21 @@ def main():
         print(f"[hub] ensuring dataset repo exists: {args.repo_id}")
         ensure_repo(args.repo_id, hf_write_token)
 
+    # ------------------------------------------------------- resume state
+    manifest = load_manifest(out_dir)
+    rows_consumed_start = manifest["rows_consumed"]
+    tokens_start = manifest["output_tokens"]
+    shard_idx = manifest["next_shard_idx"]
+    print(f"[resume] skipping {rows_consumed_start} source rows; "
+          f"{tokens_start:,} tokens already done; next shard idx = {shard_idx}")
+
+    if args.repo_id:
+        sync_manifest_shards(args.repo_id, out_dir, manifest, hf_write_token)
+
+    if tokens_start >= args.target_tokens:
+        print("[done] target token count already satisfied; no translation needed")
+        return
+
     # ------------------------------------------------------- load vLLM
     print(f"[model] loading {args.model}...")
     t0 = time.time()
@@ -256,14 +349,6 @@ def main():
         max_tokens=args.max_new_tokens,
     )
     print(f"[model] ready in {time.time()-t0:.1f}s")
-
-    # ------------------------------------------------------- resume state
-    manifest = load_manifest(out_dir)
-    rows_consumed_start = manifest["rows_consumed"]
-    tokens_start = manifest["output_tokens"]
-    shard_idx = manifest["next_shard_idx"]
-    print(f"[resume] skipping {rows_consumed_start} source rows; "
-          f"{tokens_start:,} tokens already done; next shard idx = {shard_idx}")
 
     # ------------------------------------------------------- signal handler
     stop_requested = {"v": False}
