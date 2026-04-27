@@ -8,6 +8,9 @@ Sources included by default:
      /workspace/darija_struct_out, domains: code + math + toolcall, columns: en + dr
   3. Legacy Darija pretraining corpus:
      Lyte/darija-pretraining-corpus configs: arabic_raw + bilingual + pure
+  4. Raw English capability corpora:
+     code, math, and tool-call datasets used to preserve technical/code/math
+     tokenization and support cross-lingual transfer.
 
 The trained tokenizer is saved in nanochat's raw format under:
   <output-dir>/tokenizer/tokenizer.pkl
@@ -33,6 +36,12 @@ from typing import Iterable, Iterator
 FINEWEB_REPO = "Lyte/fineweb-edu-darija-translated"
 STRUCTURED_REPO = "Lyte/darija-structured-translated"
 LEGACY_REPO = "Lyte/darija-pretraining-corpus"
+RAW_CODE_REPO = "m-a-p/CodeFeedback-Filtered-Instruction"
+RAW_MATH_REPO = "HuggingFaceTB/finemath"
+RAW_MATH_CONFIG = "finemath-4plus"
+RAW_TOOLCALL_REPO = "NousResearch/hermes-function-calling-v1"
+EXTRA_ENGLISH_REPO = "HuggingFaceFW/fineweb-edu"
+EXTRA_ENGLISH_CONFIG = "sample-10BT"
 LEGACY_CONFIGS = ("arabic_raw", "bilingual", "pure")
 STRUCTURED_DOMAINS = ("code", "math", "toolcall")
 SPECIAL_TOKENS = [
@@ -89,6 +98,14 @@ def env_token() -> str | None:
 
 def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def clean_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
 
 
 def load_hub_manifest(repo_id: str, token: str | None) -> dict:
@@ -220,6 +237,141 @@ def iter_legacy_local(data_dir: Path) -> Iterator[TextDoc]:
                 yield TextDoc(label, text)
 
 
+def reached_limit(n_docs: int, n_chars: int, max_docs: int, max_chars: int) -> bool:
+    if max_docs >= 0 and n_docs >= max_docs:
+        return True
+    if max_chars >= 0 and n_chars >= max_chars:
+        return True
+    return False
+
+
+def iter_raw_code(repo_id: str, split: str, token: str | None,
+                  max_docs: int, max_chars: int) -> Iterator[TextDoc]:
+    from datasets import load_dataset
+
+    print(f"[source] streaming raw code {repo_id}/{split}")
+    ds = load_dataset(repo_id, split=split, streaming=True, token=token)
+    n_docs = 0
+    n_chars = 0
+    for row in ds:
+        q = clean_text(row.get("query") or row.get("instruction") or row.get("prompt"))
+        a = clean_text(row.get("answer") or row.get("response") or row.get("output"))
+        if q and a:
+            text = f"### Question\n{q}\n\n### Answer\n{a}"
+        else:
+            text = clean_text(row.get("text"))
+        if not text:
+            continue
+        if reached_limit(n_docs, n_chars, max_docs, max_chars):
+            break
+        n_docs += 1
+        n_chars += len(text)
+        yield TextDoc("raw_code_en", text)
+
+
+def iter_raw_math(repo_id: str, config: str, split: str, token: str | None,
+                  max_docs: int, max_chars: int) -> Iterator[TextDoc]:
+    from datasets import load_dataset
+
+    name = None if config in ("", "default", "none", "null") else config
+    label = config if name is not None else "default"
+    print(f"[source] streaming raw math {repo_id}/{label}/{split}")
+    ds = load_dataset(repo_id, name=name, split=split, streaming=True, token=token)
+    n_docs = 0
+    n_chars = 0
+    for row in ds:
+        text = (
+            row.get("text")
+            or row.get("problem")
+            or row.get("question")
+            or row.get("solution")
+            or ""
+        )
+        text = str(text).strip()
+        if not text:
+            continue
+        if reached_limit(n_docs, n_chars, max_docs, max_chars):
+            break
+        n_docs += 1
+        n_chars += len(text)
+        yield TextDoc("raw_math_en", text)
+
+
+def render_conversation_row(row: dict) -> str:
+    convs = row.get("conversations") or row.get("messages") or row.get("dialog") or []
+    if isinstance(convs, list) and convs:
+        parts = []
+        for turn in convs:
+            if not isinstance(turn, dict):
+                continue
+            role = (
+                turn.get("from")
+                or turn.get("role")
+                or turn.get("speaker")
+                or "unknown"
+            )
+            value = (
+                turn.get("value")
+                or turn.get("content")
+                or turn.get("text")
+                or ""
+            )
+            value = str(value).strip()
+            if value:
+                parts.append(f"### {str(role).upper()}\n{value}")
+        if parts:
+            return "\n\n".join(parts)
+
+    for key in ("text", "prompt", "query", "instruction"):
+        value = clean_text(row.get(key))
+        if value:
+            return value
+    return ""
+
+
+def iter_raw_toolcall(repo_id: str, split: str, token: str | None,
+                      max_docs: int, max_chars: int) -> Iterator[TextDoc]:
+    from datasets import load_dataset
+
+    print(f"[source] streaming raw toolcall {repo_id}/{split}")
+    ds = load_dataset(repo_id, split=split, streaming=True, token=token)
+    n_docs = 0
+    n_chars = 0
+    for row in ds:
+        text = render_conversation_row(row).strip()
+        if not text:
+            continue
+        if reached_limit(n_docs, n_chars, max_docs, max_chars):
+            break
+        n_docs += 1
+        n_chars += len(text)
+        yield TextDoc("raw_toolcall_en", text)
+
+
+def iter_extra_english(repo_id: str, config: str, split: str, text_field: str,
+                       token: str | None, max_docs: int,
+                       max_chars: int) -> Iterator[TextDoc]:
+    from datasets import load_dataset
+
+    if max_docs == 0 or max_chars == 0:
+        return
+    name = None if config in ("", "default", "none", "null") else config
+    label = config if name is not None else "default"
+    print(f"[source] streaming extra English {repo_id}/{label}/{split}")
+    ds = load_dataset(repo_id, name=name, split=split, streaming=True, token=token)
+    n_docs = 0
+    n_chars = 0
+    for row in ds:
+        text = clean_text(row.get(text_field))
+        if not text:
+            continue
+        if reached_limit(n_docs, n_chars, max_docs, max_chars):
+            break
+        n_docs += 1
+        n_chars += len(text)
+        yield TextDoc("extra_english", text)
+
+
 def build_docs(args, token: str | None) -> Iterator[TextDoc]:
     if not args.skip_fineweb:
         yield from iter_fineweb(
@@ -245,6 +397,45 @@ def build_docs(args, token: str | None) -> Iterator[TextDoc]:
             yield from iter_legacy_local(Path(args.legacy_data_dir))
         else:
             yield from iter_legacy_hf(args.legacy_repo, args.legacy_configs, token)
+
+    if not args.skip_raw_code:
+        yield from iter_raw_code(
+            args.raw_code_repo,
+            args.raw_code_split,
+            token,
+            args.raw_code_max_docs,
+            args.raw_code_max_chars,
+        )
+
+    if not args.skip_raw_math:
+        yield from iter_raw_math(
+            args.raw_math_repo,
+            args.raw_math_config,
+            args.raw_math_split,
+            token,
+            args.raw_math_max_docs,
+            args.raw_math_max_chars,
+        )
+
+    if not args.skip_raw_toolcall:
+        yield from iter_raw_toolcall(
+            args.raw_toolcall_repo,
+            args.raw_toolcall_split,
+            token,
+            args.raw_toolcall_max_docs,
+            args.raw_toolcall_max_chars,
+        )
+
+    if not args.skip_extra_english:
+        yield from iter_extra_english(
+            args.extra_english_repo,
+            args.extra_english_config,
+            args.extra_english_split,
+            args.extra_english_text_field,
+            token,
+            args.extra_english_max_docs,
+            args.extra_english_max_chars,
+        )
 
 
 def capped_text(text: str, doc_cap: int) -> str:
@@ -482,11 +673,36 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--legacy-data-dir", default=None,
                    help="optional local nanochat-style legacy parquet dir")
 
+    p.add_argument("--raw-code-repo", default=RAW_CODE_REPO)
+    p.add_argument("--raw-code-split", default="train")
+    p.add_argument("--raw-code-max-docs", type=int, default=250_000)
+    p.add_argument("--raw-code-max-chars", type=int, default=-1)
+    p.add_argument("--raw-math-repo", default=RAW_MATH_REPO)
+    p.add_argument("--raw-math-config", default=RAW_MATH_CONFIG)
+    p.add_argument("--raw-math-split", default="train")
+    p.add_argument("--raw-math-max-docs", type=int, default=250_000)
+    p.add_argument("--raw-math-max-chars", type=int, default=-1)
+    p.add_argument("--raw-toolcall-repo", default=RAW_TOOLCALL_REPO)
+    p.add_argument("--raw-toolcall-split", default="train")
+    p.add_argument("--raw-toolcall-max-docs", type=int, default=-1)
+    p.add_argument("--raw-toolcall-max-chars", type=int, default=-1)
+    p.add_argument("--extra-english-repo", default=EXTRA_ENGLISH_REPO)
+    p.add_argument("--extra-english-config", default=EXTRA_ENGLISH_CONFIG)
+    p.add_argument("--extra-english-split", default="train")
+    p.add_argument("--extra-english-text-field", default="text")
+    p.add_argument("--extra-english-max-docs", type=int, default=0,
+                   help="0 disables generic extra English by default")
+    p.add_argument("--extra-english-max-chars", type=int, default=-1)
+
     p.add_argument("--darija-only", action="store_true",
                    help="skip English columns from translated datasets")
     p.add_argument("--skip-fineweb", action="store_true")
     p.add_argument("--skip-structured", action="store_true")
     p.add_argument("--skip-legacy", action="store_true")
+    p.add_argument("--skip-raw-code", action="store_true")
+    p.add_argument("--skip-raw-math", action="store_true")
+    p.add_argument("--skip-raw-toolcall", action="store_true")
+    p.add_argument("--skip-extra-english", action="store_true")
 
     p.add_argument("--push-to-hub", default=None,
                    help="Hub model repo id for tokenizer upload")

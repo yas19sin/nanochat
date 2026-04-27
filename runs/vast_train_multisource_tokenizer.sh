@@ -25,12 +25,27 @@ FINEWEB_OUT_DIR="${FINEWEB_OUT_DIR:-/workspace/darija_out}"
 STRUCTURED_OUT_DIR="${STRUCTURED_OUT_DIR:-/workspace/darija_struct_out}"
 LEGACY_REPO="${LEGACY_REPO:-Lyte/darija-pretraining-corpus}"
 LEGACY_CONFIGS="${LEGACY_CONFIGS:-arabic_raw bilingual pure}"
+RAW_CODE_MAX_DOCS="${RAW_CODE_MAX_DOCS:-250000}"
+RAW_MATH_MAX_DOCS="${RAW_MATH_MAX_DOCS:-250000}"
+RAW_TOOLCALL_MAX_DOCS="${RAW_TOOLCALL_MAX_DOCS:--1}"
+EXTRA_ENGLISH_MAX_DOCS="${EXTRA_ENGLISH_MAX_DOCS:-0}"
 VOCAB_SIZE="${VOCAB_SIZE:-32768}"
 DOC_CAP="${DOC_CAP:-10000}"
 THREADS="${THREADS:-16}"
 
 cd /workspace/nanochat
 git pull
+
+if ! python -c "import rustbpe, tiktoken, tokenizers, datasets, pyarrow, huggingface_hub" 2>/dev/null; then
+  pip install -q \
+    "rustbpe>=0.1.0" \
+    "tiktoken>=0.11.0" \
+    "tokenizers>=0.22.0" \
+    "datasets>=4.0.0" \
+    "pyarrow>=21.0.0" \
+    "huggingface_hub>=0.34.0" \
+    "transformers>=4.57.0"
+fi
 
 python -m scripts.train_multisource_tokenizer \
   --mode train-and-count \
@@ -39,6 +54,10 @@ python -m scripts.train_multisource_tokenizer \
   --structured-out-dir "${STRUCTURED_OUT_DIR}" \
   --legacy-repo "${LEGACY_REPO}" \
   --legacy-configs ${LEGACY_CONFIGS} \
+  --raw-code-max-docs "${RAW_CODE_MAX_DOCS}" \
+  --raw-math-max-docs "${RAW_MATH_MAX_DOCS}" \
+  --raw-toolcall-max-docs "${RAW_TOOLCALL_MAX_DOCS}" \
+  --extra-english-max-docs "${EXTRA_ENGLISH_MAX_DOCS}" \
   --vocab-size "${VOCAB_SIZE}" \
   --doc-cap "${DOC_CAP}" \
   --threads "${THREADS}" \
