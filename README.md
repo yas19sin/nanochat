@@ -117,6 +117,15 @@ python -m scripts.darija_data_prep --no-streaming           # download full data
 python -m scripts.darija_data_prep --cache-dir /tmp/hf      # HF cache location
 ```
 
+For the private translated FineWeb-Edu corpus, put `HF_TOKEN=...` in `.env` and run the cleaner:
+
+```bash
+python -m scripts.clean_fineweb_edu_darija --max-rows 5000 --dry-run
+python -m scripts.clean_fineweb_edu_darija --output-mode both
+```
+
+This streams [Lyte/fineweb-edu-darija-translated](https://huggingface.co/datasets/Lyte/fineweb-edu-darija-translated), filters low-quality translations, deduplicates by Darija text, and writes nanochat parquet shards to `~/.cache/nanochat/darija_fineweb_edu_clean` by default. Use `--darija-only` to skip English documents, or point training at the output with `NANOCHAT_DATA_DIR`.
+
 ### Darija Training Pipeline
 
 The full pipeline (tokenizer → pretraining → SFT → eval) is in [runs/darija.sh](runs/darija.sh):
