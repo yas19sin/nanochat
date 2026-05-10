@@ -252,8 +252,12 @@ class MinHasher:
 
     def signature(self, shingles: Iterable[str]) -> tuple[int, ...]:
         np = self._np
-        # built-in hash is fast; mask to 32 bits then map through affine perms
-        xs = [hash(s) & 0xFFFFFFFF for s in shingles]
+        # Use a deterministic 32-bit hash (zlib.crc32) — Python's built-in
+        # hash() is randomized per process via PYTHONHASHSEED, which means
+        # the same shingle gets different values in different workers.
+        # That silently breaks cross-process / cross-shard signature compare.
+        import zlib
+        xs = [zlib.crc32(s.encode("utf-8")) for s in shingles]
         if not xs:
             return self._empty
         x = np.asarray(xs, dtype=np.uint64)              # (S,)
