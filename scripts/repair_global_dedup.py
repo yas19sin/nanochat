@@ -33,7 +33,8 @@ def main() -> int:
     global_seen: dict[str, tuple[int, int]] = {}  # hash -> (sid, shard)
     cross_dup = 0
     total_survivors = 0
-    survivors_after_exact: list[tuple[int, int, str]] = []  # (shard, src_idx, hash)
+    # (shard, src_idx, hash)
+    survivors_after_exact: list[tuple[int, int, str]] = []
 
     for sub in shard_dirs:
         try:

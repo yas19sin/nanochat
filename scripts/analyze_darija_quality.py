@@ -788,8 +788,10 @@ def run_all_shards(
                   f"(elapsed {elapsed/60:.1f}m, eta {eta/60:.1f}m)")
     else:
         with ProcessPoolExecutor(max_workers=workers) as ex:
-            futures = {ex.submit(_shard_worker, p)
-                                 : p["shard_idx"] for p in payloads}
+            futures = {
+                ex.submit(_shard_worker, p): p["shard_idx"]
+                for p in payloads
+            }
             for fut in as_completed(futures):
                 idx = futures[fut]
                 try:
@@ -824,12 +826,14 @@ def run_all_shards(
     # We do exact dedup first (cheap, hash-based) and then near dedup over
     # whatever survives, using a global LSH index.
     print("[analyze] running cross-shard exact dedup ...")
-    global_seen: dict[str, tuple[int, int]] = {}   # hash -> (src_idx, shard_idx)
+    # hash -> (src_idx, shard_idx)
+    global_seen: dict[str, tuple[int, int]] = {}
     cross_dup = 0
     total_survivors = 0
     # Track which (shard, local_row_idx) survive exact dedup so we can
     # subset their sigs for the near-dedup index.
-    survivors_after_exact: list[tuple[int, int, int, str]] = []  # (shard, local_row, src_idx, h)
+    # (shard, local_row, src_idx, h)
+    survivors_after_exact: list[tuple[int, int, int, str]] = []
 
     for rep in reports:
         try:
