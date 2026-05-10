@@ -55,7 +55,42 @@ CHAT_MARKER_RE = re.compile(r"(?im)^\s*(?:system|user|assistant)\s*:")
 URL_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
 EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b")
 WORD_RE = re.compile(r"\S+")
-CHAR_RUN_RE = re.compile(r"(.)\1{6,}", re.UNICODE)
+# Char-run: 7+ identical chars. Educational content commonly uses long runs
+# of `_`, `.`, `…`, `-`, `*`, `=` as fill-in-the-blank markers or separators —
+# so the char-run check should ignore these. We only flag runs of LETTERS or
+# DIGITS, which is what indicates true model-loop garbage.
+CHAR_RUN_RE = re.compile(r"([^\W\d_])\1{6,}", re.UNICODE)
+NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
+# Western and Arabic-Indic digits 0-9
+DIGIT_TRANSLATE = str.maketrans({
+    "٠": "0", "١": "1", "٢": "2", "٣": "3", "٤": "4",
+    "٥": "5", "٦": "6", "٧": "7", "٨": "8", "٩": "9",
+    "۰": "0", "۱": "1", "۲": "2", "۳": "3", "۴": "4",
+    "۵": "5", "۶": "6", "۷": "7", "۸": "8", "۹": "9",
+})
+# Zero-width / formatting chars to strip
+ZW_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+# Tatweel/kashida is decorative — strip for normalization
+TATWEEL = "\u0640"
+# Arabic letter unification (used for hashing only, not for kept text)
+ARABIC_UNIFY = str.maketrans({
+    "أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا",
+    "ى": "ي", "ئ": "ي",
+    "ؤ": "و",
+    "ة": "ه",
+})
+# Combining diacritics (harakat / shadda / sukun)
+HARAKAT_RE = re.compile(r"[\u064b-\u065f\u0670\u06d6-\u06ed]")
+
+# Arabic refusal patterns — narrowly scoped to AI-self-reference / model
+# apologies. Generic "ما يمكنش" is normal Darija negation, so we DO NOT match
+# bare modals here. Must look like the assistant talking about itself.
+ARABIC_REFUSAL_RE = re.compile(
+    r"(أنا\s+(نموذج|ذكاء\s+اصطناعي|مساعد\s+ذكي)"
+    r"|كنموذج\s+(لغوي|ذكاء)"
+    r"|ما\s+(نقدرش|قدرتش)\s+(نعاونك|نجاوبك|نعطيك|نساعدك)"
+    r"|آسف[،,]?\s+(ما|أنا)\s+(نقدرش|قدرتش|نموذج))"
+)
 
 REFUSAL_RE = re.compile(
     r"(?i)("
@@ -89,10 +124,26 @@ class Cfg:
     min_arabic_fraction: float = 0.40
     min_length_ratio: float = 0.35
     max_length_ratio: float = 3.00
-    max_url_count: int = 4
+    # URL count: pretraining-friendly. Citation-heavy fineweb-edu articles
+    # routinely have 5-10 URLs. Bumped 4 -> 12.
+    max_url_count: int = 12
+    # EN-side filters (mirror; usually only catches very malformed EN)
+    # Bumped 8 -> 16; fineweb-edu academic content can cite a lot.
+    en_max_url_count: int = 16
+    en_min_alnum_fraction: float = 0.40  # reject EN that is mostly markup/punct
+    # Number-set drift: catches *severe* mistranslated statistics / dates.
+    # Default off because numbers are often legitimately paraphrased or
+    # omitted in Darija (e.g. "1,000th" -> "ألف"). When enabled, we only
+    # fire on dramatic drift (>= drift_min) when EN has many numbers.
+    number_set_check: bool = False
+    number_set_drift_min: int = 4
+    number_set_en_min: int = 4
     # repetition
     # Raised from 0.20 -> 0.30: 0.20 was catching legitimate prose.
     max_top_4gram_fraction: float = 0.30
+    # Top-3 4-gram fraction catches soft phrase loops where no single 4-gram
+    # dominates but a few do (e.g. listicle bullets with rotating placeholders).
+    max_top3_4gram_fraction: float = 0.45
     # Lowered from 0.35 -> 0.30: 0.35 caught some on-topic but legit Darija.
     min_unique_word_ratio: float = 0.30
     # dedup / lsh
@@ -124,35 +175,63 @@ def normalize_text(value: Any) -> str:
         return ""
     text = str(value).replace("\x00", " ").replace("\u00a0", " ")
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # strip zero-width / RTL/LTR marks; they are invisible noise that breaks
+    # exact-dedup hashing without changing the visible content.
+    text = ZW_RE.sub("", text)
     text = "\n".join(SPACE_RE.sub(" ", line).strip()
                      for line in text.split("\n"))
     return BLANK_LINES_RE.sub("\n\n", text).strip()
 
 
-def normalize_for_hash(text: str) -> str:
-    # collapse whitespace, lowercase latin, drop punctuation noise for matching
-    t = re.sub(r"\s+", " ", text).strip().casefold()
+def normalize_arabic_for_hash(text: str) -> str:
+    """Aggressive Arabic-aware normalization for dedup hashing only.
+
+    Strips tatweel, harakat, and unifies alef/ya/waw/teh-marbuta variants so
+    that cosmetically-identical texts collide. Also unifies digits.
+    """
+    t = text.replace(TATWEEL, "")
+    t = HARAKAT_RE.sub("", t)
+    t = t.translate(ARABIC_UNIFY)
+    t = t.translate(DIGIT_TRANSLATE)
     return t
+
+
+def normalize_for_hash(text: str) -> str:
+    # collapse whitespace, lowercase latin, unify arabic forms, unify digits
+    t = normalize_arabic_for_hash(text)
+    t = re.sub(r"\s+", " ", t).strip().casefold()
+    return t
+
+
+def number_set(text: str) -> set[str]:
+    """Set of numbers appearing in text, with Arabic-Indic digits unified."""
+    t = text.translate(DIGIT_TRANSLATE)
+    return {m.group(0).replace(",", ".") for m in NUMBER_RE.finditer(t)}
 
 
 # ----------------------------- repetition -----------------------------
 
-def repetition_stats(text: str) -> tuple[float, float, int]:
-    """Return (top_4gram_fraction, unique_word_ratio, char_run_max)."""
+def repetition_stats(text: str) -> tuple[float, float, int, float]:
+    """Return (top_4gram_fraction, unique_word_ratio, char_run_max,
+    top3_4gram_fraction). top3 catches soft phrase loops where no single
+    4-gram dominates but a few do.
+    """
     words = WORD_RE.findall(text)
     n = len(words)
     if n < 4:
-        return 0.0, 1.0, 0
+        return 0.0, 1.0, 0, 0.0
     grams = [tuple(words[i:i + 4]) for i in range(n - 3)]
     c = Counter(grams)
-    top = c.most_common(1)[0][1]
-    top_frac = top / len(grams)
+    most = c.most_common(3)
+    total = len(grams)
+    top_frac = most[0][1] / total
+    top3_frac = sum(cnt for _, cnt in most) / total
     uniq_ratio = len(set(words)) / n
     run = 0
     m = CHAR_RUN_RE.search(text)
     if m:
         run = len(m.group(0))
-    return top_frac, uniq_ratio, run
+    return top_frac, uniq_ratio, run, top3_frac
 
 
 # ----------------------------- minhash / lsh -----------------------------
@@ -184,7 +263,9 @@ class MinHasher:
 
 
 def char_shingles(text: str, k: int) -> set[str]:
-    t = re.sub(r"\s+", " ", text)
+    # use arabic-normalized form so near-dup catches cosmetic variants
+    t = normalize_arabic_for_hash(text)
+    t = re.sub(r"\s+", " ", t)
     if len(t) < k:
         return {t}
     return {t[i:i + k] for i in range(len(t) - k + 1)}
@@ -235,6 +316,14 @@ def evaluate_row(en: str, darija: str, cfg: Cfg) -> tuple[str | None, str, int]:
     if ld > cfg.max_darija_chars:
         return "long_darija", darija, n_emails
 
+    # ---- EN-side sanity (cheap, catches scraper garbage in source) ----
+    # mostly-punctuation/markup EN suggests source itself is junk
+    en_alnum = sum(1 for c in en if c.isalnum())
+    if en_alnum / max(le, 1) < cfg.en_min_alnum_fraction:
+        return "en_low_alnum", darija, n_emails
+    if len(URL_RE.findall(en)) > cfg.en_max_url_count:
+        return "en_too_many_urls", darija, n_emails
+
     arabic = len(ARABIC_RE.findall(darija))
     if arabic < cfg.min_arabic_chars:
         return "low_arabic_chars", darija, n_emails
@@ -255,16 +344,28 @@ def evaluate_row(en: str, darija: str, cfg: Cfg) -> tuple[str | None, str, int]:
         return "chat_marker", darija, n_emails
     if BOILERPLATE_RE.search(darija):
         return "translator_boilerplate", darija, n_emails
-    if REFUSAL_RE.search(darija):
+    if REFUSAL_RE.search(darija) or ARABIC_REFUSAL_RE.search(darija):
         return "refusal_text", darija, n_emails
     if len(URL_RE.findall(darija)) > cfg.max_url_count:
         return "too_many_urls", darija, n_emails
 
-    top_frac, uniq_ratio, run = repetition_stats(darija)
+    # Number-set drift: catches severely mistranslated statistics.
+    # Off by default; when on, only fires for dramatic, multi-number drift.
+    if cfg.number_set_check:
+        en_nums = number_set(en)
+        if len(en_nums) >= cfg.number_set_en_min:
+            d_nums = number_set(darija)
+            drift = len(en_nums.symmetric_difference(d_nums))
+            if drift >= cfg.number_set_drift_min:
+                return "number_set_mismatch", darija, n_emails
+
+    top_frac, uniq_ratio, run, top3_frac = repetition_stats(darija)
     if run >= 8:
         return "char_run_repetition", darija, n_emails
     if top_frac > cfg.max_top_4gram_fraction:
         return "ngram_repetition", darija, n_emails
+    if top3_frac > cfg.max_top3_4gram_fraction:
+        return "ngram_top3_repetition", darija, n_emails
     if uniq_ratio < cfg.min_unique_word_ratio:
         return "low_word_diversity", darija, n_emails
 
@@ -382,7 +483,7 @@ def process_window(
         exact_seen[h] = ord_i
 
         sig = minhasher.signature(char_shingles(darija, cfg.shingle_k))
-        survivors.append((int(row.get("src_idx", ord_i)), darija, en))
+        survivors.append((int(row.get("src_idx", ord_i)), darija, en, h))
         sigs.append(sig)
 
         if seen_total % 5000 == 0:
@@ -440,7 +541,7 @@ def process_window(
             continue
         examples = []
         for m in members[:3]:
-            sid, d, en = survivors[m]
+            sid, d, en, _h = survivors[m]
             examples.append(
                 {"src_idx": sid, "en": en[:300], "darija": d[:300]})
         cluster_records.append({"size": len(members), "examples": examples})
@@ -494,6 +595,24 @@ def process_window(
         for members in clusters.values():
             sid = survivors[members[0]][0]
             f.write(f"{sid}\n")
+    # Cross-shard dedup needs (src_idx, exact_hash) for each cluster rep, so
+    # persist it. One line per canonical kept row.
+    with (output_dir / "survivors.jsonl").open("w", encoding="utf-8") as f:
+        for members in clusters.values():
+            sid, _d, _en, h = survivors[members[0]]
+            f.write(json.dumps({"src_idx": sid, "exact_hash": h}) + "\n")
+    # Also persist the MinHash signature for each canonical survivor, in row
+    # order matching survivors.jsonl, so cross-shard near-dedup can rebuild
+    # an LSH index without re-reading text. uint32 is enough since p < 2**32.
+    import numpy as _np
+    canonical_sig_rows = []
+    for members in clusters.values():
+        canonical_sig_rows.append(sigs[members[0]])
+    if canonical_sig_rows:
+        sig_arr = _np.asarray(canonical_sig_rows, dtype=_np.uint32)
+    else:
+        sig_arr = _np.zeros((0, cfg.minhash_perms), dtype=_np.uint32)
+    _np.save(output_dir / "sigs.npy", sig_arr)
     (output_dir / "report.md").write_text(render_markdown(report), encoding="utf-8")
     return report
 
@@ -693,14 +812,153 @@ def run_all_shards(
     reports.sort(key=_shard_key)
 
     agg = aggregate_reports(reports, output_dir)
-    # Note: dedup here is within-shard only. Cross-shard duplicates are not
-    # detected. For Lyte/fineweb-edu-darija-translated, shards are split by
-    # source row, so cross-shard exact duplicates should be rare.
+
+    # ---------- Cross-shard exact dedup ----------
+    # Each shard wrote survivors.jsonl with (src_idx, exact_hash) for its
+    # canonical kept rows, plus sigs.npy with the matching MinHash signatures.
+    # We do exact dedup first (cheap, hash-based) and then near dedup over
+    # whatever survives, using a global LSH index.
+    print("[analyze] running cross-shard exact dedup ...")
+    global_seen: dict[str, tuple[int, int]] = {}   # hash -> (src_idx, shard_idx)
+    cross_dup = 0
+    total_survivors = 0
+    # Track which (shard, local_row_idx) survive exact dedup so we can
+    # subset their sigs for the near-dedup index.
+    survivors_after_exact: list[tuple[int, int, int, str]] = []  # (shard, local_row, src_idx, h)
+
+    for rep in reports:
+        try:
+            shard_idx = int(rep["window"]["label"].replace("shard", ""))
+        except Exception:
+            shard_idx = -1
+        sub = output_dir / f"shard_{shard_idx:04d}"
+        sjp = sub / "survivors.jsonl"
+        if not sjp.exists():
+            continue
+        with sjp.open(encoding="utf-8") as f:
+            for local_i, line in enumerate(f):
+                s = json.loads(line)
+                total_survivors += 1
+                h = s["exact_hash"]
+                sid = int(s["src_idx"])
+                if h in global_seen:
+                    cross_dup += 1
+                    continue
+                global_seen[h] = (sid, shard_idx)
+                survivors_after_exact.append((shard_idx, local_i, sid, h))
+
+    global_after_exact = len(survivors_after_exact)
+    cross_exact_pct = round(100 * cross_dup / max(total_survivors, 1), 3)
+    print(f"[analyze] cross-shard exact: {total_survivors:,} -> "
+          f"{global_after_exact:,} ({cross_dup:,} dups, {cross_exact_pct}%)")
+
+    # ---------- Cross-shard near dedup (global LSH) ----------
+    print("[analyze] running cross-shard near dedup (global LSH) ...")
+    import numpy as _np
+    cfg = Cfg()
+    bands = cfg.lsh_bands
+    rows_per_band = cfg.minhash_perms // bands
+
+    # Load sigs per shard, keep only rows that survived exact dedup.
+    # We index by global row id (0..global_after_exact-1).
+    shard_sig_cache: dict[int, "_np.ndarray"] = {}
+    global_sigs = _np.zeros((global_after_exact, cfg.minhash_perms),
+                            dtype=_np.uint32)
+    for gi, (sh, local_i, _sid, _h) in enumerate(survivors_after_exact):
+        if sh not in shard_sig_cache:
+            sig_path = output_dir / f"shard_{sh:04d}" / "sigs.npy"
+            shard_sig_cache[sh] = _np.load(sig_path)
+        global_sigs[gi] = shard_sig_cache[sh][local_i]
+    # Free per-shard caches as we go (just clear after we're done)
+    shard_sig_cache.clear()
+
+    # Build LSH band buckets and union-find.
+    uf = UnionFind()
+    for i in range(global_after_exact):
+        uf.parent.setdefault(i, i)
+
+    for b in range(bands):
+        start = b * rows_per_band
+        end = start + rows_per_band
+        # Hash band tuples; tuple of small ints -> fits in a python dict key.
+        buckets: dict[tuple, int] = {}
+        band_slice = global_sigs[:, start:end]
+        for gi in range(global_after_exact):
+            key = (b,) + tuple(int(x) for x in band_slice[gi])
+            first = buckets.get(key)
+            if first is None:
+                buckets[key] = gi
+            else:
+                uf.union(first, gi)
+        del buckets
+
+    # Walk clusters: keep root, drop the rest.
+    cluster_root: dict[int, int] = {}  # gi -> root_gi
+    for i in range(global_after_exact):
+        cluster_root[i] = uf.find(i)
+    cluster_size = Counter(cluster_root.values())
+    near_dup_cross = global_after_exact - len(cluster_size)
+    near_dup_pct = round(100 * near_dup_cross / max(total_survivors, 1), 3)
+    print(f"[analyze] cross-shard near: {global_after_exact:,} -> "
+          f"{len(cluster_size):,} ({near_dup_cross:,} near-dup dropped, "
+          f"{near_dup_pct}%)")
+
+    # Write the final global kept set: one entry per cluster root.
+    final_kept_path = output_dir / "global_kept.jsonl"
+    seen_roots: set[int] = set()
+    with final_kept_path.open("w", encoding="utf-8") as gout:
+        for gi in range(global_after_exact):
+            root = cluster_root[gi]
+            if root in seen_roots:
+                continue
+            seen_roots.add(root)
+            sh, _li, sid, h = survivors_after_exact[gi]
+            gout.write(json.dumps({
+                "shard": sh, "src_idx": sid, "exact_hash": h
+            }) + "\n")
+
+    global_unique = len(cluster_size)
+
+    # Largest cross-shard near-dup clusters for sanity reporting.
+    top_cross = cluster_size.most_common(20)
+    cross_cluster_sizes = [n for _, n in top_cross]
+
+    # Patch the aggregate file with global numbers.
+    agg["global_dedup"] = {
+        "per_shard_survivors": total_survivors,
+        "cross_shard_exact_dup_dropped": cross_dup,
+        "after_cross_exact": global_after_exact,
+        "cross_shard_near_dup_dropped": near_dup_cross,
+        "global_unique": global_unique,
+        "cross_shard_exact_dup_pct": cross_exact_pct,
+        "cross_shard_near_dup_pct": near_dup_pct,
+        "largest_cross_shard_clusters": cross_cluster_sizes,
+    }
+    (output_dir / "aggregate.json").write_text(
+        json.dumps(agg, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    md_extra = (
+        "\n\n## Cross-shard dedup\n\n"
+        "| metric | value |\n|---|---:|\n"
+        f"| per-shard survivors (in) | {total_survivors:,} |\n"
+        f"| cross-shard exact dups dropped | {cross_dup:,} ({cross_exact_pct}%) |\n"
+        f"| after cross-shard exact | {global_after_exact:,} |\n"
+        f"| cross-shard near dups dropped | {near_dup_cross:,} ({near_dup_pct}%) |\n"
+        f"| **global unique** | **{global_unique:,}** |\n"
+    )
+    if cross_cluster_sizes and cross_cluster_sizes[0] > 1:
+        md_extra += "\nTop cross-shard near-dup cluster sizes: " + \
+            ", ".join(str(s) for s in cross_cluster_sizes) + "\n"
+    agg_md_path = output_dir / "aggregate.md"
+    agg_md_path.write_text(agg_md_path.read_text(encoding="utf-8") + md_extra,
+                           encoding="utf-8")
+
     (output_dir / "DEDUP_SCOPE.txt").write_text(
-        "Within-shard exact + near dedup only. Cross-shard dedup NOT applied.\n",
+        "Within-shard: exact + near (MinHash LSH ~0.42 Jaccard).\n"
+        "Across-shard: exact + near (global MinHash LSH).\n",
         encoding="utf-8",
     )
-    print("\n" + render_aggregate_md(agg))
+    print("\n" + render_aggregate_md(agg) + md_extra)
     print(f"\n[analyze] total elapsed: {(time.time()-t0)/60:.1f} min")
     return 0
 
