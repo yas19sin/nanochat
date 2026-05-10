@@ -748,6 +748,7 @@ def run_all_shards(
     max_rows: int | None,
     workers: int,
     shard_subset: list[int] | None = None,
+    cross_shard_near_dedup: bool = False,
 ) -> int:
     shard_urls = list_repo_shard_urls(HF_DATASET, token)
     total_shards = len(shard_urls)
@@ -856,7 +857,58 @@ def run_all_shards(
     print(f"[analyze] cross-shard exact: {total_survivors:,} -> "
           f"{global_after_exact:,} ({cross_dup:,} dups, {cross_exact_pct}%)")
 
-    # ---------- Cross-shard near dedup (global LSH) ----------
+    if not cross_shard_near_dedup:
+        # ---------- Skip global LSH (default) ----------
+        # Reason: with millions of nodes a global MinHash LSH degenerates via
+        # transitive closure: any chain of weakly-similar pairs collapses into
+        # one giant cluster. Empirically, on this corpus cross-shard exact
+        # dedup finds ~7 duplicates per 4.86M rows, so real cross-shard near
+        # duplication is well below 0.01% and not worth the bug risk. Within-
+        # shard near dedup already handled the bulk (~9%) of redundancy.
+        print("[analyze] skipping cross-shard near dedup (default; "
+              "use --cross-shard-near-dedup to enable)")
+        final_kept_path = output_dir / "global_kept.jsonl"
+        with final_kept_path.open("w", encoding="utf-8") as gout:
+            for sh, _li, sid, h in survivors_after_exact:
+                gout.write(json.dumps({
+                    "shard": sh, "src_idx": sid, "exact_hash": h
+                }) + "\n")
+
+        global_unique = global_after_exact
+        agg["global_dedup"] = {
+            "per_shard_survivors": total_survivors,
+            "cross_shard_exact_dup_dropped": cross_dup,
+            "after_cross_exact": global_after_exact,
+            "cross_shard_near_dedup": "skipped",
+            "global_unique": global_unique,
+            "cross_shard_exact_dup_pct": cross_exact_pct,
+        }
+        (output_dir / "aggregate.json").write_text(
+            json.dumps(agg, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        md_extra = (
+            "\n\n## Cross-shard dedup\n\n"
+            "| metric | value |\n|---|---:|\n"
+            f"| per-shard survivors (in) | {total_survivors:,} |\n"
+            f"| cross-shard exact dups dropped | {cross_dup:,} ({cross_exact_pct}%) |\n"
+            f"| cross-shard near dedup | skipped (see DEDUP_SCOPE.txt) |\n"
+            f"| **global unique** | **{global_unique:,}** |\n"
+        )
+        agg_md_path = output_dir / "aggregate.md"
+        agg_md_path.write_text(agg_md_path.read_text(encoding="utf-8") + md_extra,
+                               encoding="utf-8")
+        (output_dir / "DEDUP_SCOPE.txt").write_text(
+            "Within-shard: exact + near (MinHash LSH ~0.42 Jaccard).\n"
+            "Across-shard: exact only. Near-dup skipped (transitive-closure\n"
+            "explosion on M+ nodes makes global LSH unreliable; real cross-\n"
+            "shard near duplication is empirically <0.01% on this corpus).\n",
+            encoding="utf-8",
+        )
+        print("\n" + render_aggregate_md(agg) + md_extra)
+        print(f"\n[analyze] total elapsed: {(time.time()-t0)/60:.1f} min")
+        return 0
+
+    # ---------- Cross-shard near dedup (global LSH) — opt-in ----------
     print("[analyze] running cross-shard near dedup (global LSH) ...")
     import numpy as _np
     cfg = Cfg()
@@ -986,6 +1038,7 @@ def run(args: argparse.Namespace) -> int:
             max_rows=args.max_rows,
             workers=args.workers,
             shard_subset=subset,
+            cross_shard_near_dedup=args.cross_shard_near_dedup,
         )
 
     # Shard-based sampling is more reliable than .skip() for probing different
@@ -1111,6 +1164,12 @@ def parse_args() -> argparse.Namespace:
                          "Combine with --shards to restrict to a subset.")
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4) - 2),
                     help="Number of parallel worker processes for --all-shards.")
+    ap.add_argument("--cross-shard-near-dedup", action="store_true",
+                    help="Run a global MinHash LSH across all shards' kept rows "
+                         "(off by default). Within-shard near dedup runs "
+                         "unconditionally. Global LSH on millions of nodes "
+                         "tends to degenerate via transitive-closure chains; "
+                         "only enable if you have <1M total survivors.")
     ap.add_argument("--cache-dir", default=None)
     ap.add_argument("--hf-token", default=None)
     return ap.parse_args()
