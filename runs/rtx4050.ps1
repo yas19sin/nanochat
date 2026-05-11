@@ -1,5 +1,5 @@
 # RTX 4050 Laptop GPU (6 GB VRAM) — single GPU Darija training
-# ~50M params (depth=8), AttnRes + Engram enabled, ~15 min run
+# depth=8 quick run, ~15 min
 #
 # Usage:
 #   .\runs\rtx4050.ps1
@@ -15,7 +15,7 @@ if (-not (Test-Path $env:NANOCHAT_DATA_DIR)) {
     exit 1
 }
 
-# Single-GPU training — depth=8 (~50M params with AttnRes + Engram)
+# Single-GPU training — depth=8 quick run
 .\.venv\Scripts\python.exe scripts/base_train.py `
     --depth=8 `
     --head-dim=64 `
@@ -24,11 +24,6 @@ if (-not (Test-Path $env:NANOCHAT_DATA_DIR)) {
     --device-batch-size=4 `
     --total-batch-size=8192 `
     --num-iterations=1000 `
-    --use-attn-res `
-    --use-engram `
-    --engram-table-size=16384 `
-    --engram-n-heads=2 `
-    --engram-embed-dim=128 `
     --eval-every=100 `
     --eval-tokens=10240 `
     --core-metric-every=-1 `

@@ -9,9 +9,6 @@
 #
 # Then run any of:
 #   bash runs/darija_baseline.sh
-#   bash runs/darija_engram.sh
-#   bash runs/darija_attnres.sh
-#   bash runs/darija_attnres_engram.sh
 
 set -euo pipefail
 export OMP_NUM_THREADS=1
@@ -47,6 +44,3 @@ echo "Tokenizer: $NANOCHAT_BASE_DIR/tok32768.bin"
 echo ""
 echo "Now run one of:"
 echo "  bash runs/darija_baseline.sh"
-echo "  bash runs/darija_engram.sh"
-echo "  bash runs/darija_attnres.sh"
-echo "  bash runs/darija_attnres_engram.sh"

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Darija 1B baseline — no Engram, no AttnRes.
+# Darija 1B baseline.
 # Pretraining + eval only. Run darija_prep.sh first for data + tokenizer.
 # Designed for 8×H100/H200.
 #
