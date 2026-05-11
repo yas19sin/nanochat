@@ -216,9 +216,9 @@ val_dataset = TaskMixture([
     TuluDarijaEnglish(split="validation"),
 ])
 # DataLoader is defined here, it emits inputs, targets : 2D tensors of shape (device_batch_size, max_seq_len)
-# A big problem is that we don't know the final num_iterations in advance. So we create
-# these two global variables and update them from within the data generator.
-# we will toggle this to True when we reach the end of the training dataset
+# A full-epoch SFT run does not know its final optimizer-step count in advance, so
+# the data generator reports dataset progress. Fixed --num-iterations runs are
+# stopped by the outer optimizer-step loop, not by microbatch counts here.
 last_step = False
 approx_progress = 0.0  # will go from 0 to 1 over the course of the epoch
 current_epoch = 1  # track epoch for logging
@@ -247,7 +247,6 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
     cursor = ddp_rank
     consumed = ddp_rank  # Track actual consumption separately from buffering
     epoch = 1
-    it = 0  # iteration counter
 
     def refill_buffer():
         nonlocal cursor, epoch
@@ -309,20 +308,17 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
             rows.append(row[:row_capacity])
             mask_rows.append(mask_row[:row_capacity])
 
-        # Stopping condition to respect num_iterations, if given
-        it += 1
-        if 0 < args.num_iterations <= it and split == "train":
-            last_step = True
-
         # Update progress tracking (based on consumed, not cursor, to account for buffering)
         if split == "train":
             current_epoch = epoch
             if args.num_iterations > 0:
-                approx_progress = it / args.num_iterations
+                # Fixed-length runs are scheduled by optimizer steps outside the
+                # generator. Keep this bounded so accidental use cannot overshoot.
+                approx_progress = 0.0
             else:
                 approx_progress = consumed / dataset_size
             # Trigger last_step when we've consumed enough (instead of when cursor wraps)
-            if consumed >= dataset_size:
+            if args.num_iterations <= 0 and consumed >= dataset_size:
                 last_step = True
 
         # Build tensors
@@ -362,6 +358,7 @@ progress = 0  # will go from 0 to 1 over the course of the epoch
 
 
 def get_lr_multiplier(progress):
+    progress = min(max(progress, 0.0), 1.0)
     if progress < args.warmup_ratio:
         return (progress + 1e-8) / args.warmup_ratio
     elif progress <= 1.0 - args.warmdown_ratio:
@@ -374,6 +371,7 @@ def get_lr_multiplier(progress):
 
 
 def get_muon_momentum(progress):
+    progress = min(max(progress, 0.0), 1.0)
     if progress < 0.05:
         frac = progress / 0.05
         return (1 - frac) * 0.85 + frac * 0.97
@@ -392,7 +390,11 @@ smooth_train_loss = 0  # EMA of training loss
 ema_beta = 0.9  # EMA decay factor
 total_training_time = 0  # total wall-clock time of training
 step = 0
+fixed_num_iterations = args.num_iterations > 0
 while True:
+    if fixed_num_iterations:
+        last_step = step >= args.num_iterations
+
     flops_so_far = num_flops_per_token * args.total_batch_size * step
 
     # Synchronize last_step across all ranks to avoid hangs in the distributed setting
@@ -506,10 +508,13 @@ while True:
         # prefetch the next batch while the GPU is busy with forward/backward
         x, y = next(train_loader)
         # only increase progress monotonically
-        progress = max(progress, approx_progress)
+        if not fixed_num_iterations:
+            progress = max(progress, approx_progress)
     # step the optimizer
-    lrm = get_lr_multiplier(progress)
-    muon_momentum = get_muon_momentum(progress)
+    schedule_progress = min(
+        step / args.num_iterations, 1.0) if fixed_num_iterations else progress
+    lrm = get_lr_multiplier(schedule_progress)
+    muon_momentum = get_muon_momentum(schedule_progress)
     for group in optimizer.param_groups:
         group["lr"] = group["initial_lr"] * lrm
         if group['kind'] == 'muon':
@@ -531,6 +536,8 @@ while True:
 
     # State
     step += 1
+    if fixed_num_iterations:
+        progress = min(step / args.num_iterations, 1.0)
 
     # logging
     smooth_train_loss = ema_beta * smooth_train_loss + \
