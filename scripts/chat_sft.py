@@ -44,6 +44,8 @@ parser.add_argument("--model-tag", type=str, default=None,
                     help="model tag to load from")
 parser.add_argument("--model-step", type=int, default=None,
                     help="model step to load from")
+parser.add_argument("--output-tag", type=str, default=None,
+                    help="checkpoint tag to write SFT outputs to (default: --model-tag)")
 parser.add_argument("--load-optimizer", type=int, default=1,
                     help="warm-start optimizer from pretrained checkpoint (0=no, 1=yes)")
 # Training horizon
@@ -462,8 +464,8 @@ while True:
 
     # save checkpoint at the end of the run (all ranks participate so each saves its optimizer shard)
     if last_step:
-        # e.g. d12
-        output_dirname = args.model_tag if args.model_tag else f"d{depth}"
+        # e.g. d12. Keep load tag and save tag separable for SFT experiments.
+        output_dirname = args.output_tag or args.model_tag or f"d{depth}"
         checkpoint_dir = os.path.join(
             base_dir, "chatsft_checkpoints", output_dirname)
         save_checkpoint(
