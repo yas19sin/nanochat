@@ -14,6 +14,7 @@ class NanochatConfig(PretrainedConfig):
         n_embd=768,
         window_pattern="SSSL",
         pad_vocab_size_to=64,
+        ve_gate_channels=12,
         use_cache=True,
         output_hidden_states=False,
         bos_token_id=None,
@@ -30,6 +31,7 @@ class NanochatConfig(PretrainedConfig):
         self.n_embd = n_embd
         self.window_pattern = window_pattern
         self.pad_vocab_size_to = pad_vocab_size_to
+        self.ve_gate_channels = ve_gate_channels
         self.use_cache = use_cache
         self.output_hidden_states = output_hidden_states
         super().__init__(

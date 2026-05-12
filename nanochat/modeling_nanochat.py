@@ -80,7 +80,7 @@ class NanochatAttention(nn.Module):
         self.n_kv_head = config.n_kv_head
         self.n_embd = config.n_embd
         self.head_dim = config.head_dim
-        self.ve_gate_channels = 32
+        self.ve_gate_channels = config.ve_gate_channels
         self.c_q = Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
         self.c_k = Linear(self.n_embd, self.n_kv_head *
                           self.head_dim, bias=False)
@@ -135,12 +135,14 @@ class NanochatAttention(nn.Module):
 
         if ve is not None:
             ve = ve.view(batch_size, query_len, self.n_kv_head, self.head_dim)
-            gate = 2 * \
+            gate = 3 * \
                 torch.sigmoid(self.ve_gate(x[..., :self.ve_gate_channels]))
             v = v + gate.unsqueeze(-1) * ve
 
         q = norm(apply_rotary_emb(q, cos, sin))
         k = norm(apply_rotary_emb(k, cos, sin))
+        q = q * 1.2
+        k = k * 1.2
 
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
