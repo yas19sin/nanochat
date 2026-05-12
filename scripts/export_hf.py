@@ -79,16 +79,26 @@ def export_tokenizer(tokenizer_dir: Path, output_dir: Path, bos_token: str, eos_
 
     import tiktoken.load as tiktoken_load
 
+    old_read_file = tiktoken_load.read_file
     sentinel = object()
     old_tiktoken_dump = tiktoken_load.dump_tiktoken_bpe
     old_convert_dump = convert_tiktoken_to_fast.__globals__.get(
         "dump_tiktoken_bpe", sentinel)
+
+    def read_file_local(blobpath):
+        path = Path(str(blobpath))
+        if path.exists():
+            return path.read_bytes()
+        return old_read_file(blobpath)
+
     try:
+        tiktoken_load.read_file = read_file_local
         tiktoken_load.dump_tiktoken_bpe = dump_tiktoken_bpe_local
         if old_convert_dump is not sentinel:
             convert_tiktoken_to_fast.__globals__["dump_tiktoken_bpe"] = dump_tiktoken_bpe_local
         convert_tiktoken_to_fast(encoding, str(output_dir))
     finally:
+        tiktoken_load.read_file = old_read_file
         tiktoken_load.dump_tiktoken_bpe = old_tiktoken_dump
         if old_convert_dump is not sentinel:
             convert_tiktoken_to_fast.__globals__["dump_tiktoken_bpe"] = old_convert_dump
