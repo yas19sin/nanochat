@@ -248,6 +248,9 @@ class NanochatModel(NanochatPreTrainedModel):
         )
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
+        self.smear_gate = Linear(config.smear_gate_channels, 1, bias=False)
+        self.smear_lambda = nn.Parameter(torch.zeros(1))
+        self.backout_lambda = nn.Parameter(0.2 * torch.ones(1))
         kv_dim = config.n_kv_head * config.head_dim
         self.value_embeds = nn.ModuleDict(
             {str(i): nn.Embedding(padded_vocab_size, kv_dim)
@@ -260,7 +263,7 @@ class NanochatModel(NanochatPreTrainedModel):
         self,
         seq_len: int,
         head_dim: int,
-        base: int = 10000,
+        base: int = 100000,
         device: Optional[torch.device] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if device is None:
@@ -276,7 +279,7 @@ class NanochatModel(NanochatPreTrainedModel):
     def _compute_window_sizes(self, config: NanochatConfig) -> list[int]:
         pattern = config.window_pattern.upper()
         long_window = config.sequence_len
-        short_window = long_window // 2
+        short_window = -(-long_window // 4 // 128) * 128
         sizes = []
         for layer_idx in range(config.n_layer):
             char = pattern[layer_idx % len(pattern)]
@@ -337,10 +340,22 @@ class NanochatModel(NanochatPreTrainedModel):
         hidden_states = hidden_states.to(
             dtype=self.transformer["wte"].weight.dtype)
         hidden_states = norm(hidden_states)
+
+        if seq_len > 1:
+            channels = self.config.smear_gate_channels
+            gate = self.smear_lambda.to(hidden_states.dtype) * torch.sigmoid(
+                self.smear_gate(hidden_states[:, 1:, :channels])
+            )
+            hidden_states = torch.cat(
+                [hidden_states[:, :1], hidden_states[:, 1:] + gate * hidden_states[:, :-1]],
+                dim=1,
+            )
         x0 = hidden_states
 
         all_hidden_states = () if output_hidden_states else None
         presents = () if use_cache else None
+        backout_layer = self.config.n_layer // 2
+        x_backout = None
         for layer_idx, block in enumerate(self.transformer["h"]):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
@@ -361,7 +376,11 @@ class NanochatModel(NanochatPreTrainedModel):
             )
             if use_cache:
                 presents = presents + (present,)
+            if layer_idx == backout_layer:
+                x_backout = hidden_states
 
+        if x_backout is not None:
+            hidden_states = hidden_states - self.backout_lambda.to(hidden_states.dtype) * x_backout
         hidden_states = norm(hidden_states)
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
@@ -430,7 +449,7 @@ class NanochatForCausalLM(NanochatPreTrainedModel, GenerationMixin):
             outputs.last_hidden_state)[..., : self.config.vocab_size]
         logits = logits.float()
 
-        softcap = 20.0
+        softcap = 15.0
         logits = softcap * torch.tanh(logits / softcap)
 
         loss = None

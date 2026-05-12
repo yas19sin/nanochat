@@ -118,6 +118,7 @@ def write_generation_config(output_dir: Path, source: str, eos_token_id: int | N
             repetition_penalty=1.05,
             pad_token_id=pad_token_id,
             eos_token_id=eos_token_id,
+            use_cache=False,
         )
     else:
         config = GenerationConfig(
@@ -129,6 +130,7 @@ def write_generation_config(output_dir: Path, source: str, eos_token_id: int | N
             repetition_penalty=1.1,
             pad_token_id=pad_token_id,
             eos_token_id=eos_token_id,
+            use_cache=False,
         )
     config.save_pretrained(output_dir)
 
@@ -355,6 +357,7 @@ def export_checkpoint(
 
     config = build_model_config(
         meta_data, bos_token_id, eos_token_id, pad_token_id)
+    config.use_cache = False
     model = NanochatForCausalLM(config)
 
     source_dtype = model_data["transformer.wte.weight"].dtype
