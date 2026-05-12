@@ -78,17 +78,20 @@ def export_tokenizer(tokenizer_dir: Path, output_dir: Path, bos_token: str, eos_
                              str(rank).encode("utf-8") + b"\n")
 
     import tiktoken.load as tiktoken_load
-    import transformers.integrations.tiktoken as hf_tiktoken
 
+    sentinel = object()
     old_tiktoken_dump = tiktoken_load.dump_tiktoken_bpe
-    old_hf_dump = hf_tiktoken.dump_tiktoken_bpe
+    old_convert_dump = convert_tiktoken_to_fast.__globals__.get(
+        "dump_tiktoken_bpe", sentinel)
     try:
         tiktoken_load.dump_tiktoken_bpe = dump_tiktoken_bpe_local
-        hf_tiktoken.dump_tiktoken_bpe = dump_tiktoken_bpe_local
+        if old_convert_dump is not sentinel:
+            convert_tiktoken_to_fast.__globals__["dump_tiktoken_bpe"] = dump_tiktoken_bpe_local
         convert_tiktoken_to_fast(encoding, str(output_dir))
     finally:
         tiktoken_load.dump_tiktoken_bpe = old_tiktoken_dump
-        hf_tiktoken.dump_tiktoken_bpe = old_hf_dump
+        if old_convert_dump is not sentinel:
+            convert_tiktoken_to_fast.__globals__["dump_tiktoken_bpe"] = old_convert_dump
 
     tokenizer_path = output_dir / "tokenizer.json"
 
