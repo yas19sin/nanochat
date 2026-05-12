@@ -95,13 +95,15 @@ def export_tokenizer(tokenizer_dir: Path, output_dir: Path, bos_token: str, eos_
         tiktoken_load.read_file = read_file_local
         tiktoken_load.dump_tiktoken_bpe = dump_tiktoken_bpe_local
         if old_convert_dump is not sentinel:
-            convert_tiktoken_to_fast.__globals__["dump_tiktoken_bpe"] = dump_tiktoken_bpe_local
+            convert_tiktoken_to_fast.__globals__[
+                "dump_tiktoken_bpe"] = dump_tiktoken_bpe_local
         convert_tiktoken_to_fast(encoding, str(output_dir))
     finally:
         tiktoken_load.read_file = old_read_file
         tiktoken_load.dump_tiktoken_bpe = old_tiktoken_dump
         if old_convert_dump is not sentinel:
-            convert_tiktoken_to_fast.__globals__["dump_tiktoken_bpe"] = old_convert_dump
+            convert_tiktoken_to_fast.__globals__[
+                "dump_tiktoken_bpe"] = old_convert_dump
 
     tokenizer_path = output_dir / "tokenizer.json"
 
@@ -185,7 +187,8 @@ def write_model_card(
     base_model_repo: str | None = None,
 ) -> None:
     model_config = meta_data.get("model_config", {})
-    title = repo_id.split("/")[-1] if repo_id else f"nanochat-{source}-{model_tag or 'model'}"
+    title = repo_id.split(
+        "/")[-1] if repo_id else f"nanochat-{source}-{model_tag or 'model'}"
     phase = "Instruction-tuned" if source != "base" else "Base"
     base_model_line = f"\nbase_model: {base_model_repo}" if base_model_repo else ""
     base_section = (
@@ -223,13 +226,12 @@ print(tokenizer.decode(outputs[0], skip_special_tokens=False))
     training_text = (
         "Continued with supervised fine-tuning on Moroccan Darija instruction data."
         if source != "base"
-        else "Pretrained on the cleaned Moroccan Darija FineWeb-Edu translation corpus."
+        else "Pretrained on the cleaned custom made Moroccan Darija FineWeb-Edu translation corpus."
     )
 
     readme = f"""---
 language:
-- ar
-- ar-MA
+- ary
 license: mit
 library_name: transformers
 pipeline_tag: text-generation
@@ -253,7 +255,7 @@ This repo is exported in Hugging Face Transformers format with custom model code
 
 This is a **pilot/test checkpoint**, not the final full-data model. It was trained to validate the Darija data pipeline, tokenizer, NanoChat architecture export, and SFT workflow before a larger billion-plus-token training run.
 
-The cleaned base corpus contains **4,856,133 Darija rows** and approximately **1.53B tokens** with the included tokenizer. That number describes the available cleaned corpus; this checkpoint was intentionally trained on a much smaller/shorter schedule.
+The cleaned base corpus contains **5M Darija rows** and approximately **2B tokens** with the included tokenizer. That number describes the available cleaned corpus; this checkpoint was intentionally trained on a much smaller/shorter schedule.
 
 ## Model Details
 
