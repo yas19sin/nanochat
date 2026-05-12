@@ -263,7 +263,11 @@ This repo is exported in Hugging Face Transformers format with custom model code
 
 {training_text}
 
-Base corpus summary: 4,856,133 cleaned Darija rows, approximately 1.53B tokens with the included tokenizer.
+## Status
+
+This is a **pilot/test checkpoint**, not the final full-data run. It was trained to validate the Darija data pipeline, tokenizer, NanoChat architecture export, and SFT workflow before a larger billion-plus-token training run.
+
+The cleaned base corpus contains 4,856,133 Darija rows, approximately 1.53B tokens with the included tokenizer. That number describes the available cleaned corpus; this checkpoint was intentionally trained on a much smaller/shorter schedule.
 
 The instruction-tuned variant is small and experimental. It is useful for lightweight Darija chat tests, but it is not reliable for math, factuality, code debugging, translation fidelity, or safety-critical decisions.
 
