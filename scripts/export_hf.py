@@ -1,4 +1,5 @@
 import argparse
+import base64
 import json
 import pickle
 import shutil
@@ -64,7 +65,30 @@ def export_tokenizer(tokenizer_dir: Path, output_dir: Path, bos_token: str, eos_
     with open(tokenizer_dir / "tokenizer.pkl", "rb") as handle:
         encoding = pickle.load(handle)
 
-    convert_tiktoken_to_fast(encoding, str(output_dir))
+    # transformers delegates tiktoken BPE writing to blobfile. On Windows,
+    # blobfile rejects normal absolute paths like C:\...\tokenizer.model.
+    # Patch only that tiny writer to use pathlib; the on-disk format is the
+    # same one tiktoken writes: base64(token_bytes) + rank per line.
+    def dump_tiktoken_bpe_local(bpe_ranks, tiktoken_bpe_file):
+        path = Path(str(tiktoken_bpe_file))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as handle:
+            for token, rank in sorted(bpe_ranks.items(), key=lambda item: item[1]):
+                handle.write(base64.b64encode(token) + b" " +
+                             str(rank).encode("utf-8") + b"\n")
+
+    import tiktoken.load as tiktoken_load
+    import transformers.integrations.tiktoken as hf_tiktoken
+
+    old_tiktoken_dump = tiktoken_load.dump_tiktoken_bpe
+    old_hf_dump = hf_tiktoken.dump_tiktoken_bpe
+    try:
+        tiktoken_load.dump_tiktoken_bpe = dump_tiktoken_bpe_local
+        hf_tiktoken.dump_tiktoken_bpe = dump_tiktoken_bpe_local
+        convert_tiktoken_to_fast(encoding, str(output_dir))
+    finally:
+        tiktoken_load.dump_tiktoken_bpe = old_tiktoken_dump
+        hf_tiktoken.dump_tiktoken_bpe = old_hf_dump
 
     tokenizer_path = output_dir / "tokenizer.json"
 
