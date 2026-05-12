@@ -194,7 +194,7 @@ def write_model_card(
     chat_usage = """
 messages = [{"role": "user", "content": "جاوبني بالدارجة: شنو هي أحسن طريقة نتعلم بها البرمجة؟"}]
 inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt").to(model.device)
-if isinstance(inputs, dict):
+if not hasattr(inputs, "shape"):
     inputs = inputs["input_ids"]
 outputs = model.generate(
     inputs,

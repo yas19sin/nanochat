@@ -153,7 +153,7 @@ def render_chat(tokenizer, prompt: str, device):
         add_generation_prompt=True,
         return_tensors="pt",
     )
-    if isinstance(rendered, dict):
+    if not hasattr(rendered, "shape"):
         rendered = rendered["input_ids"]
     return rendered.to(device)
 
