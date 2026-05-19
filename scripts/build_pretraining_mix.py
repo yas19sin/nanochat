@@ -681,6 +681,18 @@ def load_hf_rows(
 ) -> Iterable[dict[str, Any]]:
     from datasets import load_dataset
 
+    # This repo is an old HF dataset-script dataset. datasets>=4 refuses to
+    # execute scripts, so load the raw JSONL gzip file directly.
+    if spec.repo_id == STACKEXCHANGE_MATH:
+        data_file = f"hf://datasets/{STACKEXCHANGE_MATH}/{spec.split}.jsonl.gz"
+        return load_dataset(
+            "json",
+            data_files=data_file,
+            split="train",
+            streaming=streaming,
+            cache_dir=cache_dir,
+        )
+
     kwargs: dict[str, Any] = {
         "split": spec.split,
         "streaming": streaming,
