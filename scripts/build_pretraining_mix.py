@@ -407,6 +407,29 @@ def safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_")[:80] or "source"
 
 
+def format_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
+def progress_line(total_counts: Counter[str], start_time: float, source_name: str | None = None) -> str:
+    elapsed = time.time() - start_time
+    docs = int(total_counts["train_docs"])
+    rate = docs / max(elapsed, 1e-6)
+    gib = int(total_counts["train_bytes"]) / (1024 ** 3)
+    prefix = f"{source_name}: " if source_name else ""
+    return (
+        f"  ...{prefix}train_docs={docs:,} val_docs={int(total_counts['val_docs']):,} "
+        f"bytes={gib:.2f}GiB elapsed={format_duration(elapsed)} rate={rate:,.0f} docs/s"
+    )
+
+
 def default_output_dir() -> Path:
     base = os.environ.get(
         "NANOCHAT_BASE_DIR",
@@ -786,7 +809,10 @@ def run_curriculum(
     progress_every: int,
     max_total_docs: int,
 ) -> None:
+    global_t0 = time.time()
     for runtime in sorted(runtimes.values(), key=lambda item: item.spec.priority):
+        source_t0 = time.time()
+        source_train_start = int(total_counts["train_docs"])
         print(
             f"[source] {runtime.spec.name} "
             f"repo={runtime.spec.repo_id} config={runtime.spec.config} split={runtime.spec.split}"
@@ -807,8 +833,15 @@ def run_curriculum(
                 and total_counts["train_docs"] > 0
                 and total_counts["train_docs"] % progress_every == 0
             ):
-                print(f"  ...train_docs={total_counts['train_docs']:,} val_docs={total_counts['val_docs']:,}")
+                print(progress_line(total_counts, global_t0, runtime.spec.name))
         writer.flush(source_name=runtime.spec.name)
+        source_docs = int(total_counts["train_docs"]) - source_train_start
+        source_rate = source_docs / max(time.time() - source_t0, 1e-6)
+        print(
+            f"[source done] {runtime.spec.name}: {runtime.stats.stopped_reason} "
+            f"docs={source_docs:,} elapsed={format_duration(time.time() - source_t0)} "
+            f"rate={source_rate:,.0f} docs/s"
+        )
 
 
 def run_interleaved(
@@ -825,6 +858,7 @@ def run_interleaved(
     active = dict(runtimes)
     cycle = build_slot_cycle(active, rng)
     cycle_idx = 0
+    global_t0 = time.time()
     print(f"[layout] interleaving {len(active)} sources")
 
     while active:
@@ -856,7 +890,7 @@ def run_interleaved(
             and total_counts["train_docs"] > 0
             and total_counts["train_docs"] % progress_every == 0
         ):
-            print(f"  ...train_docs={total_counts['train_docs']:,} val_docs={total_counts['val_docs']:,}")
+            print(progress_line(total_counts, global_t0))
 
 
 def prepare_output_dir(output_dir: Path, overwrite: bool) -> None:
