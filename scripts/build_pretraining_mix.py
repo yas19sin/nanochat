@@ -279,6 +279,16 @@ def jsonish(value: Any) -> str:
 
 
 def format_row(row: dict[str, Any], formatter: str) -> str:
+    if isinstance(row, list):
+        if row and all(isinstance(item, dict) for item in row):
+            row = row[0]
+        elif len(row) >= 2:
+            row = {"title_body": row[0], "upvoted_answer": row[1]}
+        elif len(row) == 1:
+            row = {"title_body": row[0], "upvoted_answer": ""}
+        else:
+            row = {}
+
     if formatter == "text":
         return row.get("text") or ""
     if formatter == "stackexchange_math":
@@ -757,11 +767,21 @@ def iter_stackexchange_math_jsonl(split: str, token: str | None) -> Iterable[dic
                 if not raw_line.strip():
                     continue
                 try:
-                    yield json.loads(raw_line)
+                    item = json.loads(raw_line)
                 except json.JSONDecodeError as exc:
                     raise RuntimeError(
                         f"Invalid JSON in {STACKEXCHANGE_MATH}/{split}.jsonl.gz line {line_no}"
                     ) from exc
+                if isinstance(item, list):
+                    for subitem in item:
+                        if isinstance(subitem, dict):
+                            yield subitem
+                        elif isinstance(subitem, list):
+                            yield subitem
+                        else:
+                            yield {"title_body": subitem, "upvoted_answer": ""}
+                else:
+                    yield item
 
 
 def make_runtimes(
