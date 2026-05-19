@@ -723,6 +723,14 @@ def load_hf_rows(
     if spec.repo_id == STACKEXCHANGE_MATH:
         return iter_stackexchange_math_jsonl(spec.split, token)
 
+    if spec.repo_id == NEMOTRON_AGENTIC:
+        return iter_hf_jsonl_file(
+            repo_id=NEMOTRON_AGENTIC,
+            filename=f"data/{spec.split}.jsonl",
+            token=token,
+            skip_bad_lines=True,
+        )
+
     kwargs: dict[str, Any] = {
         "split": spec.split,
         "streaming": streaming,
@@ -749,39 +757,69 @@ def load_hf_rows(
     raise RuntimeError("unreachable")
 
 
-def iter_stackexchange_math_jsonl(split: str, token: str | None) -> Iterable[dict[str, Any]]:
+def iter_hf_jsonl_file(
+    *,
+    repo_id: str,
+    filename: str,
+    token: str | None,
+    skip_bad_lines: bool,
+) -> Iterable[Any]:
     from huggingface_hub import hf_hub_url
     import requests
 
     url = hf_hub_url(
-        repo_id=STACKEXCHANGE_MATH,
-        filename=f"{split}.jsonl.gz",
+        repo_id=repo_id,
+        filename=filename,
         repo_type="dataset",
     )
     headers = {"Authorization": f"Bearer {token}"} if token else None
     with requests.get(url, headers=headers, stream=True, timeout=60) as response:
         response.raise_for_status()
         response.raw.decode_content = True
-        with gzip.GzipFile(fileobj=response.raw) as handle:
+        is_gzip = filename.endswith(".gz")
+        handle = gzip.GzipFile(fileobj=response.raw) if is_gzip else response.iter_lines()
+        bad_lines = 0
+        try:
             for line_no, raw_line in enumerate(handle, 1):
                 if not raw_line.strip():
                     continue
                 try:
-                    item = json.loads(raw_line)
+                    yield json.loads(raw_line)
                 except json.JSONDecodeError as exc:
+                    if skip_bad_lines:
+                        bad_lines += 1
+                        if bad_lines <= 5:
+                            print(
+                                f"[jsonl warning] skipped malformed line {line_no} in "
+                                f"{repo_id}/{filename}: {exc}",
+                                file=sys.stderr,
+                            )
+                        continue
                     raise RuntimeError(
-                        f"Invalid JSON in {STACKEXCHANGE_MATH}/{split}.jsonl.gz line {line_no}"
+                        f"Invalid JSON in {repo_id}/{filename} line {line_no}"
                     ) from exc
-                if isinstance(item, list):
-                    for subitem in item:
-                        if isinstance(subitem, dict):
-                            yield subitem
-                        elif isinstance(subitem, list):
-                            yield subitem
-                        else:
-                            yield {"title_body": subitem, "upvoted_answer": ""}
+        finally:
+            if is_gzip:
+                handle.close()
+
+
+def iter_stackexchange_math_jsonl(split: str, token: str | None) -> Iterable[dict[str, Any]]:
+    for item in iter_hf_jsonl_file(
+        repo_id=STACKEXCHANGE_MATH,
+        filename=f"{split}.jsonl.gz",
+        token=token,
+        skip_bad_lines=False,
+    ):
+        if isinstance(item, list):
+            for subitem in item:
+                if isinstance(subitem, dict):
+                    yield subitem
+                elif isinstance(subitem, list):
+                    yield subitem
                 else:
-                    yield item
+                    yield {"title_body": subitem, "upvoted_answer": ""}
+        else:
+            yield item
 
 
 def make_runtimes(
