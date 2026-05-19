@@ -19,6 +19,7 @@ Use --smoke-test to exercise the writer locally without Hugging Face access.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import os
 import random
@@ -201,14 +202,16 @@ class ShardWriter:
         shard_size: int,
         row_group_size: int,
         fixed_source_name: str | None = None,
+        initial_idx: int = 0,
+        existing_shards: list[dict[str, Any]] | None = None,
     ) -> None:
         self.output_dir = output_dir
         self.shard_size = shard_size
         self.row_group_size = row_group_size
         self.fixed_source_name = fixed_source_name
         self.rows: list[str] = []
-        self.shards: list[dict[str, Any]] = []
-        self.shard_idx = 0
+        self.shards: list[dict[str, Any]] = list(existing_shards or [])
+        self.shard_idx = initial_idx
 
     def add(self, text: str, source_name: str) -> None:
         self.rows.append(text)
@@ -705,16 +708,10 @@ def load_hf_rows(
     from datasets import load_dataset
 
     # This repo is an old HF dataset-script dataset. datasets>=4 refuses to
-    # execute scripts, so load the raw JSONL gzip file directly.
+    # execute scripts, and the packaged JSON loader infers an invalid schema on
+    # this mixed JSONL. Stream/decode line-by-line instead.
     if spec.repo_id == STACKEXCHANGE_MATH:
-        data_file = f"hf://datasets/{STACKEXCHANGE_MATH}/{spec.split}.jsonl.gz"
-        return load_dataset(
-            "json",
-            data_files=data_file,
-            split="train",
-            streaming=streaming,
-            cache_dir=cache_dir,
-        )
+        return iter_stackexchange_math_jsonl(spec.split, token)
 
     kwargs: dict[str, Any] = {
         "split": spec.split,
@@ -740,6 +737,31 @@ def load_hf_rows(
             )
             time.sleep(wait_s)
     raise RuntimeError("unreachable")
+
+
+def iter_stackexchange_math_jsonl(split: str, token: str | None) -> Iterable[dict[str, Any]]:
+    from huggingface_hub import hf_hub_url
+    import requests
+
+    url = hf_hub_url(
+        repo_id=STACKEXCHANGE_MATH,
+        filename=f"{split}.jsonl.gz",
+        repo_type="dataset",
+    )
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+    with requests.get(url, headers=headers, stream=True, timeout=60) as response:
+        response.raise_for_status()
+        response.raw.decode_content = True
+        with gzip.GzipFile(fileobj=response.raw) as handle:
+            for line_no, raw_line in enumerate(handle, 1):
+                if not raw_line.strip():
+                    continue
+                try:
+                    yield json.loads(raw_line)
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(
+                        f"Invalid JSON in {STACKEXCHANGE_MATH}/{split}.jsonl.gz line {line_no}"
+                    ) from exc
 
 
 def make_runtimes(
@@ -808,9 +830,17 @@ def run_curriculum(
     total_counts: Counter[str],
     progress_every: int,
     max_total_docs: int,
+    completed_sources: set[str] | None = None,
 ) -> None:
     global_t0 = time.time()
+    completed_sources = completed_sources or set()
     for runtime in sorted(runtimes.values(), key=lambda item: item.spec.priority):
+        source_key = safe_name(runtime.spec.name)
+        if source_key in completed_sources:
+            runtime.stats.stopped_reason = "resumed_existing_complete"
+            print(f"[source resume] {runtime.spec.name}: existing complete shards found; skipping")
+            continue
+
         source_t0 = time.time()
         source_train_start = int(total_counts["train_docs"])
         print(
@@ -893,12 +923,52 @@ def run_interleaved(
             print(progress_line(total_counts, global_t0))
 
 
-def prepare_output_dir(output_dir: Path, overwrite: bool) -> None:
+def prepare_output_dir(output_dir: Path, overwrite: bool, resume: bool) -> None:
+    if overwrite and resume:
+        raise SystemExit("--overwrite and --resume are mutually exclusive")
     if output_dir.exists() and any(output_dir.iterdir()):
+        if resume:
+            return
         if not overwrite:
             raise SystemExit(f"Output directory is not empty: {output_dir} (use --overwrite)")
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+
+def scan_existing_train_shards(output_dir: Path, shard_size: int) -> tuple[list[dict[str, Any]], set[str], int, int, int]:
+    import pyarrow.parquet as pq
+
+    entries: list[dict[str, Any]] = []
+    source_last_rows: dict[str, int] = {}
+    completed_sources: set[str] = set()
+    total_rows = 0
+    total_file_bytes = 0
+    max_idx = -1
+    pattern = re.compile(r"^(\d{5})_(.+)_train\.parquet$")
+
+    for path in sorted(output_dir.glob("[0-9]*_train.parquet")):
+        match = pattern.match(path.name)
+        if not match:
+            continue
+        shard_idx = int(match.group(1))
+        source_name = match.group(2)
+        rows = pq.ParquetFile(path).metadata.num_rows
+        total_rows += rows
+        total_file_bytes += path.stat().st_size
+        max_idx = max(max_idx, shard_idx)
+        source_last_rows[source_name] = rows
+        entries.append({
+            "file": path.name,
+            "rows": rows,
+            "final": rows < shard_size,
+            "resumed_existing": True,
+        })
+
+    for source_name, rows in source_last_rows.items():
+        if source_name != "final" and rows < shard_size:
+            completed_sources.add(source_name)
+
+    return entries, completed_sources, total_rows, total_file_bytes, max_idx + 1
 
 
 def parse_args() -> argparse.Namespace:
@@ -934,6 +1004,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--progress-every", type=int, default=100_000)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--resume", action="store_true",
+                   help="Resume a curriculum build from existing completed source shards.")
     p.add_argument("--smoke-test", action="store_true",
                    help="Use local synthetic rows instead of Hugging Face datasets.")
     return p.parse_args()
@@ -942,7 +1014,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     output_dir = args.output_dir or default_output_dir()
-    prepare_output_dir(output_dir, args.overwrite)
+    if args.resume and args.layout != "curriculum":
+        raise SystemExit("--resume is only supported with --layout curriculum")
+    prepare_output_dir(output_dir, args.overwrite, args.resume)
 
     load_dotenv(args.env_file)
     token = env_token(args.hf_token)
@@ -965,10 +1039,39 @@ def main() -> None:
         print(f"  - {source.name}: {target}")
 
     runtimes = make_runtimes(args, sources, token, token_counter)
+    existing_shards: list[dict[str, Any]] = []
+    completed_sources: set[str] = set()
+    existing_rows = 0
+    existing_file_bytes = 0
+    next_shard_idx = 0
+    if args.resume:
+        (
+            existing_shards,
+            completed_sources,
+            existing_rows,
+            existing_file_bytes,
+            next_shard_idx,
+        ) = scan_existing_train_shards(output_dir, args.shard_size)
+        print(
+            f"[resume] found {len(existing_shards)} train shards, "
+            f"{existing_rows:,} rows, next shard index {next_shard_idx:05d}"
+        )
+        if completed_sources:
+            print("[resume] completed sources:", ", ".join(sorted(completed_sources)))
+
     fixed_source_name = "mix" if args.layout == "interleaved" else None
-    writer = ShardWriter(output_dir, args.shard_size, TRAIN_ROW_GROUP_SIZE, fixed_source_name)
+    writer = ShardWriter(
+        output_dir,
+        args.shard_size,
+        TRAIN_ROW_GROUP_SIZE,
+        fixed_source_name,
+        initial_idx=next_shard_idx,
+        existing_shards=existing_shards,
+    )
     val = ValidationMixer(args.val_size, args.val_darija_frac, args.val_arabic_frac)
     total_counts: Counter[str] = Counter()
+    total_counts["train_docs"] = existing_rows
+    total_counts["existing_file_bytes"] = existing_file_bytes
     t0 = time.time()
 
     if args.layout == "curriculum":
@@ -979,6 +1082,7 @@ def main() -> None:
             total_counts=total_counts,
             progress_every=args.progress_every,
             max_total_docs=args.max_total_docs,
+            completed_sources=completed_sources,
         )
     else:
         run_interleaved(
@@ -1019,6 +1123,7 @@ def main() -> None:
             "chars_per_token": args.chars_per_token,
             "token_count_mode": "exact" if token_counter.exact else "approx_chars_per_token",
             "tokenizer_dir": str(args.tokenizer_dir) if args.tokenizer_dir else None,
+            "resume": args.resume,
             "shard_size": args.shard_size,
             "val_size": args.val_size,
             "val_darija_frac": args.val_darija_frac,
@@ -1032,6 +1137,7 @@ def main() -> None:
             "train_docs": int(total_counts["train_docs"]),
             "train_chars": int(total_counts["train_chars"]),
             "train_bytes": int(total_counts["train_bytes"]),
+            "existing_file_bytes": int(total_counts["existing_file_bytes"]),
             "val_docs": len(val.rows),
             "val_counts": dict(val.counts),
             "elapsed_seconds": round(elapsed, 2),
