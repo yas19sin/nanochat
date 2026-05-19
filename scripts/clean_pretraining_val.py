@@ -44,6 +44,42 @@ def exact_key(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().lower()
 
 
+def val_spans_from_manifest(manifest_path: Path, total_docs: int) -> list[dict]:
+    if not manifest_path.exists():
+        return [{"start": 0, "end": total_docs, "source": "unknown", "group": "unknown"}]
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    spans = []
+    pos = 0
+    for source, info in (manifest.get("sources") or {}).items():
+        docs_val = int(((info.get("stats") or {}).get("docs_val") or 0))
+        if docs_val <= 0:
+            continue
+        spans.append({
+            "start": pos,
+            "end": pos + docs_val,
+            "source": source,
+            "group": info.get("group") or "unknown",
+        })
+        pos += docs_val
+
+    if pos != total_docs:
+        print(
+            f"[warn] manifest val span docs={pos:,} does not match input docs={total_docs:,}; "
+            "falling back to unknown validation source labels."
+        )
+        return [{"start": 0, "end": total_docs, "source": "unknown", "group": "unknown"}]
+    return spans
+
+
+def label_for_index(index: int, spans: list[dict]) -> tuple[str, str]:
+    # Validation files are small, so a linear scan keeps this simple.
+    for span in spans:
+        if span["start"] <= index < span["end"]:
+            return span["source"], span["group"]
+    return "unknown", "unknown"
+
+
 def quality_reason(
     text: str,
     *,
@@ -112,11 +148,55 @@ def percentile(sorted_values: list[int], frac: float) -> int:
     return sorted_values[idx]
 
 
+def select_with_group_mix(
+    accepted: list[dict],
+    target_docs: int,
+    rng: random.Random,
+) -> list[dict]:
+    if target_docs <= 0 or len(accepted) <= target_docs:
+        rng.shuffle(accepted)
+        return accepted
+
+    by_group: dict[str, list[dict]] = {}
+    for item in accepted:
+        by_group.setdefault(item["group"], []).append(item)
+    for items in by_group.values():
+        rng.shuffle(items)
+
+    total_accepted = len(accepted)
+    quotas = {
+        group: int(round(target_docs * len(items) / total_accepted))
+        for group, items in by_group.items()
+    }
+    # Make quotas sum exactly to target_docs.
+    while sum(quotas.values()) > target_docs:
+        group = max(quotas, key=lambda key: quotas[key])
+        quotas[group] -= 1
+    while sum(quotas.values()) < target_docs:
+        group = max(by_group, key=lambda key: len(by_group[key]) - quotas.get(key, 0))
+        quotas[group] = quotas.get(group, 0) + 1
+
+    selected = []
+    leftovers = []
+    for group, items in by_group.items():
+        quota = min(quotas.get(group, 0), len(items))
+        selected.extend(items[:quota])
+        leftovers.extend(items[quota:])
+
+    if len(selected) < target_docs:
+        rng.shuffle(leftovers)
+        selected.extend(leftovers[: target_docs - len(selected)])
+    rng.shuffle(selected)
+    return selected[:target_docs]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=default_data_dir())
     parser.add_argument("--input", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--manifest", type=Path, default=None,
+                        help="Build manifest used to reconstruct validation source spans.")
     parser.add_argument("--target-docs", type=int, default=20_000)
     parser.add_argument("--min-chars", type=int, default=240)
     parser.add_argument("--max-chars", type=int, default=12_000)
@@ -137,17 +217,21 @@ def main() -> None:
     args.data_dir = args.data_dir.resolve()
     input_path = (args.input or (args.data_dir / "zzzz_val_mix.parquet")).resolve()
     output_path = (args.output or input_path).resolve()
+    manifest_path = (args.manifest or (args.data_dir / "manifest.json")).resolve()
 
     if not input_path.exists():
         raise SystemExit(f"Validation parquet not found: {input_path}")
 
-    accepted: list[str] = []
+    input_texts = list(iter_texts(input_path))
+    spans = val_spans_from_manifest(manifest_path, len(input_texts))
+
+    accepted: list[dict] = []
     rejected = Counter()
     seen = set()
-    input_docs = 0
+    input_docs = len(input_texts)
 
-    for raw_text in iter_texts(input_path):
-        input_docs += 1
+    for idx, raw_text in enumerate(input_texts):
+        source, group = label_for_index(idx, spans)
         text = normalize_text(raw_text)
         reason = quality_reason(
             text,
@@ -167,21 +251,28 @@ def main() -> None:
             rejected["duplicate"] += 1
             continue
         seen.add(key)
-        accepted.append(text)
+        accepted.append({"text": text, "source": source, "group": group})
 
     rng = random.Random(args.seed)
-    rng.shuffle(accepted)
-    if args.target_docs > 0:
-        accepted = accepted[: args.target_docs]
+    selected = select_with_group_mix(accepted, args.target_docs, rng)
 
-    lengths = sorted(len(text) for text in accepted)
+    lengths = sorted(len(item["text"]) for item in selected)
+    accepted_by_group = Counter(item["group"] for item in accepted)
+    accepted_by_source = Counter(item["source"] for item in accepted)
+    selected_by_group = Counter(item["group"] for item in selected)
+    selected_by_source = Counter(item["source"] for item in selected)
     summary = {
         "input_file": str(input_path),
         "output_file": str(output_path),
+        "manifest_file": str(manifest_path) if manifest_path.exists() else None,
         "input_docs": input_docs,
         "accepted_docs": len(accepted),
+        "selected_docs": len(selected),
         "target_docs": args.target_docs,
         "rejected": dict(rejected.most_common()),
+        "accepted_by_group": dict(accepted_by_group.most_common()),
+        "selected_by_group": dict(selected_by_group.most_common()),
+        "selected_by_source": dict(selected_by_source.most_common()),
         "lengths": {
             "min": percentile(lengths, 0.0),
             "p50": percentile(lengths, 0.5),
@@ -204,7 +295,7 @@ def main() -> None:
 
     if args.dry_run:
         return
-    if not accepted:
+    if not selected:
         raise SystemExit("No validation rows passed quality filters; refusing to write empty validation.")
 
     if output_path == input_path and not args.no_backup:
@@ -215,8 +306,9 @@ def main() -> None:
             shutil.copy2(input_path, backup_path)
             print(f"Backed up original validation file to {backup_path}")
 
-    write_text_parquet(output_path, accepted, args.row_group_size)
-    print(f"Wrote cleaned validation parquet: {output_path} ({len(accepted):,} rows)")
+    rows = [item["text"] for item in selected]
+    write_text_parquet(output_path, rows, args.row_group_size)
+    print(f"Wrote cleaned validation parquet: {output_path} ({len(rows):,} rows)")
 
 
 if __name__ == "__main__":
