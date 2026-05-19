@@ -208,7 +208,9 @@ def main() -> None:
         raise SystemExit("No validation rows passed quality filters; refusing to write empty validation.")
 
     if output_path == input_path and not args.no_backup:
-        backup_path = input_path.with_name(input_path.stem + ".before_clean.parquet")
+        backup_dir = input_path.parent / "_validation_backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_path = backup_dir / (input_path.stem + ".before_clean.parquet")
         if not backup_path.exists():
             shutil.copy2(input_path, backup_path)
             print(f"Backed up original validation file to {backup_path}")
