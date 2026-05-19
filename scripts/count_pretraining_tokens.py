@@ -185,21 +185,23 @@ def main() -> None:
     args.output_json = args.output_json or (args.data_dir / "exact_token_counts.json")
     args.file_jsonl = args.file_jsonl or (args.data_dir / "exact_token_counts.files.jsonl")
 
-    parquet_paths = sorted(path for path in args.data_dir.glob("*.parquet") if not path.name.endswith(".tmp"))
-    if args.max_files > 0:
-        parquet_paths = parquet_paths[: args.max_files]
-    if not parquet_paths:
+    all_parquet_paths = sorted(path for path in args.data_dir.glob("*.parquet") if not path.name.endswith(".tmp"))
+    if not all_parquet_paths:
         raise SystemExit(f"No parquet files found in {args.data_dir}")
 
+    last_path = all_parquet_paths[-1]
+    parquet_paths = all_parquet_paths
+    if args.max_files > 0:
+        parquet_paths = parquet_paths[: args.max_files]
+
     done = load_done_records(args.file_jsonl) if args.resume else {}
-    last_path = parquet_paths[-1]
     from nanochat.tokenizer import RustBPETokenizer
 
     tokenizer = RustBPETokenizer.from_directory(str(args.tokenizer_dir))
 
     print(f"Data: {args.data_dir}")
     print(f"Tokenizer: {args.tokenizer_dir}")
-    print(f"Files: {len(parquet_paths):,} ({len(done):,} already counted)")
+    print(f"Files: {len(parquet_paths):,}/{len(all_parquet_paths):,} selected ({len(done):,} already counted)")
     print(f"Output JSONL: {args.file_jsonl}")
     print(f"Summary JSON: {args.output_json}")
     print("Counting includes one prepended BOS token per document.")
