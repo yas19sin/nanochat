@@ -256,13 +256,18 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
         nonlocal cursor, epoch
         while len(conv_buffer) < buffer_size:
             conversation = dataset[cursor]
-            ids, mask = tokenizer.render_conversation(conversation)
-            conv_buffer.append((ids, mask))
+            ids, mask = tokenizer.render_conversation(
+                conversation, max_tokens=row_capacity)
             cursor += ddp_world_size
             if cursor >= dataset_size:
                 cursor = cursor % dataset_size
                 epoch += 1
                 # Note: last_step is now triggered based on consumption, not fetching
+            # Truncation can leave us with only user/prompt tokens. Those rows
+            # have no supervised assistant targets and make cross-entropy NaN.
+            if len(ids) < 2 or sum(mask[1:]) == 0:
+                continue
+            conv_buffer.append((ids, mask))
 
     while True:
         rows = []
@@ -346,6 +351,11 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
         for i, content_len in enumerate(row_lengths):
             if content_len < row_capacity:
                 targets[i, content_len-1:] = -1
+
+        assert (targets != -1).any(), (
+            f"SFT {split} batch has no supervised target tokens. "
+            "Check conversation truncation and packing settings."
+        )
 
         yield inputs, targets
 
@@ -506,6 +516,13 @@ while True:
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
         loss = model(x, y)
+        if not torch.isfinite(loss):
+            valid_targets = int((y != -1).sum().item())
+            raise RuntimeError(
+                f"Non-finite SFT loss at step {step}, micro_step {micro_step}. "
+                f"valid_targets={valid_targets}, "
+                f"max_seq_len={args.max_seq_len}, device_batch_size={args.device_batch_size}"
+            )
         train_loss = loss.detach()  # for logging
         # each .backward() is a grad sum => normalize loss here
         loss = loss / grad_accum_steps
