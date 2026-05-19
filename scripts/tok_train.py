@@ -7,6 +7,7 @@ import os
 import time
 import argparse
 import random
+import re
 import pyarrow.parquet as pq
 import torch
 from nanochat.tokenizer import RustBPETokenizer
@@ -39,10 +40,37 @@ SUBSET_WEIGHTS = {
     "darijapure": 1.3,
     "fineweb":    1.0,   # Lyte darija-translation-data (darija + english)
     "finephrase": 0.9,   # pure English
+    # pretraining_mix_prep.py numeric curriculum shard names. Tokenizer
+    # training should sample across sources, not consume the curriculum prefix.
+    "eng_general_finepdfs_dclm_fwe": 1.0,
+    "eng_code_nemotron": 0.7,
+    "eng_math_stackexchange": 0.8,
+    "eng_reason_algorithmic": 0.5,
+    "eng_reason_formal_logic": 0.5,
+    "eng_reason_economics": 0.4,
+    "eng_reason_multiple_choice": 0.6,
+    "agentic_nemotron_tool_calling": 0.5,
+    "agentic_nemotron_search": 0.4,
+    "agentic_xlam_function_calling": 0.3,
+    "arabic_raw": 1.1,
+    "darija_bilingual": 1.5,
+    "darija_pure": 2.0,
+    "darija_fineweb_edu_clean": 2.0,
     "other":      1.0,
 }
 SUBSET_PREFIXES = ("arabic_raw", "bilingual", "pure",
                    "darijapure", "fineweb", "finephrase")
+MIX_SHARD_RE = re.compile(r"^\d+_(?P<source>.+)_train\.parquet$")
+
+
+def subset_from_filename(name):
+    match = MIX_SHARD_RE.match(name)
+    if match:
+        return match.group("source")
+    for prefix in SUBSET_PREFIXES:
+        if name.startswith(prefix):
+            return prefix
+    return "other"
 
 # -----------------------------------------------------------------------------
 # Text iterator
@@ -67,17 +95,11 @@ def text_iterator():
     parquet_paths = list_parquet_files()
     train_paths = parquet_paths[:-
                                 1] if len(parquet_paths) > 1 else parquet_paths
-    grouped = {"other": []}
+    grouped = {}
     for path in train_paths:
         name = os.path.basename(path)
-        matched = False
-        for prefix in SUBSET_PREFIXES:
-            if name.startswith(prefix):
-                grouped.setdefault(prefix, []).append(path)
-                matched = True
-                break
-        if not matched:
-            grouped["other"].append(path)
+        subset = subset_from_filename(name)
+        grouped.setdefault(subset, []).append(path)
 
     subset_iters = {subset: iter_docs(paths)
                     for subset, paths in grouped.items() if paths}
