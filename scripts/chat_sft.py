@@ -84,6 +84,8 @@ parser.add_argument("--chatcore-max-cat", type=int, default=-1,
                     help="max problems per categorical task for ChatCORE")
 parser.add_argument("--chatcore-max-sample", type=int, default=24,
                     help="max problems per generative task for ChatCORE")
+parser.add_argument("--save-every", type=int, default=-1,
+                    help="save SFT checkpoint every N steps (-1 = final checkpoint only)")
 # Data mixture
 parser.add_argument("--darija-instruct-epochs", type=int, default=1,
                     help="number of epochs of Lyte/Moroccan-Darija-Instruct-573K in training mixture")
@@ -462,8 +464,12 @@ while True:
         })
         model.train()
 
-    # save checkpoint at the end of the run (all ranks participate so each saves its optimizer shard)
-    if last_step:
+    # save checkpoint at the end of the run, or periodically if requested
+    # (all ranks participate so each saves its optimizer shard)
+    should_save = last_step or (
+        step > 0 and args.save_every > 0 and step % args.save_every == 0
+    )
+    if should_save:
         # e.g. d12. Keep load tag and save tag separable for SFT experiments.
         output_dirname = args.output_tag or args.model_tag or f"d{depth}"
         checkpoint_dir = os.path.join(
