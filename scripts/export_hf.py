@@ -151,10 +151,10 @@ def write_generation_config(output_dir: Path, source: str, eos_token_id: int | N
         config = GenerationConfig(
             max_new_tokens=256,
             do_sample=True,
-            temperature=0.8,
-            top_k=100,
-            top_p=0.95,
-            repetition_penalty=1.05,
+            temperature=0.55,
+            top_k=40,
+            top_p=0.90,
+            repetition_penalty=1.15,
             pad_token_id=pad_token_id,
             eos_token_id=eos_token_id,
             use_cache=False,
@@ -187,6 +187,7 @@ def write_model_card(
     base_model_repo: str | None = None,
 ) -> None:
     model_config = meta_data.get("model_config", {})
+    user_config = meta_data.get("user_config", {})
     title = repo_id.split(
         "/")[-1] if repo_id else f"nanochat-{source}-{model_tag or 'model'}"
     phase = "Instruction-tuned" if source != "base" else "Base"
@@ -215,24 +216,46 @@ inputs = tokenizer("المغرب بلد", return_tensors="pt").to(model.device)
 outputs = model.generate(
     **inputs,
     max_new_tokens=128,
-    temperature=0.8,
-    top_k=100,
-    top_p=0.95,
+    temperature=0.55,
+    top_k=40,
+    top_p=0.90,
+    repetition_penalty=1.15,
     do_sample=True,
 )
 print(tokenizer.decode(outputs[0], skip_special_tokens=False))
 """
     usage = chat_usage if source != "base" else base_usage
-    training_text = (
-        "Continued with supervised fine-tuning on Moroccan Darija instruction data."
-        if source != "base"
-        else "Pretrained on the cleaned custom made Moroccan Darija FineWeb-Edu translation corpus."
-    )
+    if source != "base":
+        training_text = "Continued with supervised fine-tuning on Moroccan Darija instruction data."
+    else:
+        total_batch_size = meta_data.get("total_batch_size")
+        num_iterations = user_config.get("num_iterations")
+        trained_tokens = (
+            int(total_batch_size) * int(num_iterations)
+            if total_batch_size is not None and num_iterations is not None
+            else None
+        )
+        training_lines = [
+            "Pretrained with NanoChat base training on a custom Moroccan Darija/Arabic-focused shard set.",
+            "This is a base language model checkpoint, not an instruction-tuned assistant.",
+        ]
+        if trained_tokens is not None:
+            training_lines.append(f"- Training tokens: `{trained_tokens:,}`")
+        if total_batch_size is not None:
+            training_lines.append(f"- Total batch size: `{int(total_batch_size):,}` tokens")
+        if num_iterations is not None:
+            training_lines.append(f"- Training iterations: `{int(num_iterations):,}`")
+        if meta_data.get("val_bpb") is not None:
+            training_lines.append(f"- Final validation BPB: `{float(meta_data['val_bpb']):.6f}`")
+        if user_config.get("max_seq_len") is not None:
+            training_lines.append(f"- Training sequence length: `{int(user_config['max_seq_len']):,}`")
+        training_text = "\n".join(training_lines)
 
     readme = f"""---
 language:
 - ary
-license: mit
+- ar
+license: other
 library_name: transformers
 pipeline_tag: text-generation
 tags:
@@ -242,20 +265,19 @@ tags:
 - causal-lm
 - custom-code
 - preview
-- test-run{base_model_line}
+- base-lm
+- safetensors{base_model_line}
 ---
 
 # {title}
 
-{phase} NanoChat causal language model for Moroccan Darija.
+{phase} NanoChat causal language model for Moroccan Darija and Arabic.
 
 This repo is exported in Hugging Face Transformers format with custom model code. Load it with `trust_remote_code=True`.
 
 ## Preview Checkpoint Notice
 
-This is a **pilot/test checkpoint**, not the final full-data model. It was trained to validate the Darija data pipeline, tokenizer, NanoChat architecture export, and SFT workflow before a larger billion-plus-token training run.
-
-The cleaned base corpus contains **5M Darija rows** and approximately **2B tokens** with the included tokenizer. That number describes the available cleaned corpus; this checkpoint was intentionally trained on a much smaller/shorter schedule.
+This is an experimental checkpoint. It is useful for local Darija text-generation experiments and as a base checkpoint for later Darija SFT, but it is not reliable for factuality, instruction following, code, math, or safety-critical use.
 
 ## Model Details
 
@@ -272,8 +294,6 @@ The cleaned base corpus contains **5M Darija rows** and approximately **2B token
 ## Training
 
 {training_text}
-
-The instruction-tuned variant is small and experimental. It is useful for lightweight Darija chat tests, but it is not reliable for math, factuality, code debugging, translation fidelity, or safety-critical decisions.
 
 ## Usage
 
@@ -304,7 +324,7 @@ model = AutoModelForCausalLM.from_pretrained(
 
 ## Limitations
 
-This is a tiny model. Expect fluent-looking but wrong answers, repetition on some prompts, and brittle instruction following. Use it as a research artifact or local baseline, not as a production assistant.
+Expect fluent-looking but wrong answers, repetition on some prompts, and brittle instruction following. Use it as a research artifact or local baseline, not as a production assistant.
 """
     (output_dir / "README.md").write_text(readme, encoding="utf-8")
 
@@ -395,7 +415,7 @@ def export_checkpoint(
         encoding = pickle.load(handle)
     bos_token = "<|bos|>"
     eos_token = eos_token or (
-        "<|assistant_end|>" if source != "base" else None)
+        "<|assistant_end|>" if source != "base" else "<|bos|>")
     pad_token = bos_token
     bos_token_id = encoding.encode_single_token(bos_token)
     eos_token_id = encoding.encode_single_token(
