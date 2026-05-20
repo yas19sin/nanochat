@@ -108,9 +108,9 @@ parser.add_argument("--darija-structured-dataset", type=str,
                     default="Lyte/darija-structured-translated")
 parser.add_argument("--darija-structured-column", type=str, default="dr")
 parser.add_argument("--darija-structured-train-split", type=str, default="train[:99%]",
-                    help="HF split expression for structured Q/A train rows")
+                    help="structured Q/A train slice, applied after filtering parseable rows")
 parser.add_argument("--darija-structured-val-split", type=str, default="train[99%:]",
-                    help="HF split expression for structured Q/A validation rows")
+                    help="structured Q/A validation slice, applied after filtering parseable rows")
 parser.add_argument("--toxic-dataset", type=str,
                     default="Lyte/darija-toxic-conversations-50k",
                     help="HF repo id, local folder, or local file for translated toxicity data")

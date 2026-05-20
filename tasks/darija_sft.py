@@ -18,6 +18,7 @@ QA_RE = re.compile(
     r"^\s*###\s*Question\s*(?P<question>.*?)\s*###\s*Answer\s*(?P<answer>.*)\s*$",
     re.DOTALL | re.IGNORECASE,
 )
+SPLIT_SLICE_RE = re.compile(r"^(?P<base>[^\[]+)\[(?P<slice>[^\]]+)\]$")
 
 
 def parse_structured_qa(text):
@@ -29,6 +30,49 @@ def parse_structured_qa(text):
     if not question or not answer:
         return None
     return question, answer
+
+
+def parse_split_after_filter(split):
+    """Return (base_split, slice_spec) for HF-like split slices.
+
+    The structured dataset is sorted, and some tail slices contain no Q/A rows.
+    For this task we therefore load the base split first, filter parseable Q/A
+    rows, then apply the slice over that filtered index list.
+    """
+    match = SPLIT_SLICE_RE.match(split)
+    if not match:
+        return split, None
+    return match.group("base").strip(), match.group("slice").strip()
+
+
+def _slice_bound(value, n_items, default):
+    value = value.strip()
+    if not value:
+        return default
+    if value.endswith("%"):
+        pct = float(value[:-1]) / 100.0
+        return int(n_items * pct)
+    return int(value)
+
+
+def apply_filtered_slice(indices, slice_spec):
+    if slice_spec is None:
+        return indices
+    n_items = len(indices)
+    if ":" in slice_spec:
+        start_s, stop_s = slice_spec.split(":", 1)
+        start = _slice_bound(start_s, n_items, 0)
+        stop = _slice_bound(stop_s, n_items, n_items)
+        start = max(0, min(start, n_items))
+        stop = max(start, min(stop, n_items))
+        return indices[start:stop]
+
+    pos = _slice_bound(slice_spec, n_items, 0)
+    if pos < 0:
+        pos += n_items
+    if pos < 0 or pos >= n_items:
+        return []
+    return [indices[pos]]
 
 
 class HFConversationTask(Task):
@@ -107,7 +151,8 @@ class DarijaStructuredTranslated(Task):
         **kwargs,
     ):
         super().__init__(**kwargs)
-        load_kwargs = {"split": split}
+        base_split, slice_spec = parse_split_after_filter(split)
+        load_kwargs = {"split": base_split}
         token = os.environ.get("HF_TOKEN")
         if token:
             load_kwargs["token"] = token
@@ -123,11 +168,13 @@ class DarijaStructuredTranslated(Task):
         for idx, row in enumerate(self.ds):
             if parse_structured_qa(row.get(self.column_name)):
                 self.valid_indices.append(idx)
+        self.valid_indices = apply_filtered_slice(self.valid_indices, slice_spec)
 
         if not self.valid_indices:
             raise RuntimeError(
                 f"No parseable ### Question / ### Answer rows found in "
-                f"{dataset_name} split {split!r} column {column_name!r}"
+                f"{dataset_name} split {split!r} column {column_name!r} "
+                f"(loaded base split {base_split!r})"
             )
 
     @property
