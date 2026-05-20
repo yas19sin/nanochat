@@ -18,6 +18,7 @@ parser.add_argument('-p', '--prompt', type=str, default='', help='Prompt the mod
 parser.add_argument('-t', '--temperature', type=float, default=0.6, help='Temperature for generation')
 parser.add_argument('-k', '--top-k', type=int, default=50, help='Top-k sampling parameter')
 parser.add_argument('--top-p', type=float, default=1.0, help='Top-p / nucleus sampling parameter')
+parser.add_argument('--min-p', type=float, default=0.0, help='Min-p sampling parameter, relative to the most likely token')
 parser.add_argument('--repetition-penalty', type=float, default=1.0, help='Repetition penalty, 1.0 disables it')
 parser.add_argument('--device-type', type=str, default='', choices=['cuda', 'cpu', 'mps'], help='Device type for evaluation: cuda|cpu|mps. empty => autodetect')
 args = parser.parse_args()
@@ -83,6 +84,7 @@ while True:
         "temperature": args.temperature,
         "top_k": args.top_k,
         "top_p": args.top_p,
+        "min_p": args.min_p,
         "repetition_penalty": args.repetition_penalty,
     }
     response_tokens = []

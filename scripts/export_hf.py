@@ -151,10 +151,11 @@ def write_generation_config(output_dir: Path, source: str, eos_token_id: int | N
         config = GenerationConfig(
             max_new_tokens=256,
             do_sample=True,
-            temperature=0.55,
-            top_k=40,
+            temperature=0.3,
+            top_k=300,
             top_p=0.90,
-            repetition_penalty=1.15,
+            min_p=0.1,
+            repetition_penalty=1.1,
             pad_token_id=pad_token_id,
             eos_token_id=eos_token_id,
             use_cache=False,
@@ -163,9 +164,10 @@ def write_generation_config(output_dir: Path, source: str, eos_token_id: int | N
         config = GenerationConfig(
             max_new_tokens=256,
             do_sample=True,
-            temperature=0.6,
-            top_k=100,
-            top_p=0.85,
+            temperature=0.3,
+            top_k=300,
+            top_p=0.90,
+            min_p=0.1,
             repetition_penalty=1.1,
             pad_token_id=pad_token_id,
             eos_token_id=eos_token_id,
@@ -203,9 +205,10 @@ if not hasattr(inputs, "shape"):
 outputs = model.generate(
     inputs,
     max_new_tokens=256,
-    temperature=0.6,
-    top_k=100,
-    top_p=0.85,
+    temperature=0.3,
+    top_k=300,
+    top_p=0.9,
+    min_p=0.1,
     repetition_penalty=1.1,
     do_sample=True,
 )
@@ -216,10 +219,11 @@ inputs = tokenizer("المغرب بلد", return_tensors="pt").to(model.device)
 outputs = model.generate(
     **inputs,
     max_new_tokens=128,
-    temperature=0.55,
-    top_k=40,
-    top_p=0.90,
-    repetition_penalty=1.15,
+    temperature=0.3,
+    top_k=300,
+    top_p=0.9,
+    min_p=0.1,
+    repetition_penalty=1.1,
     do_sample=True,
 )
 print(tokenizer.decode(outputs[0], skip_special_tokens=False))

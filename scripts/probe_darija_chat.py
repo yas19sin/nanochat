@@ -70,33 +70,37 @@ GRID_TOP_PS = [0.95, 0.99, 0.9, 0.85]
 GRID_TOP_KS = [300, 200, 150, 100, 50]
 
 DEFAULT_PRESETS = [
-    ("greedy_p95_k200", 0.0, 0.95, 200),
-    ("very_tight", 0.1, 0.9, 100),
-    ("tight", 0.3, 0.9, 150),
-    ("balanced", 0.3, 0.95, 200),
-    ("wide_07b_style", 0.6, 0.85, 200),
+    ("greedy_p95_k200", 0.0, 0.95, 200, 0.0),
+    ("very_tight", 0.1, 0.9, 100, 0.0),
+    ("tight", 0.3, 0.9, 150, 0.0),
+    ("balanced", 0.3, 0.95, 200, 0.0),
+    ("wide_07b_style", 0.6, 0.85, 200, 0.0),
 ]
 
 
-def parse_preset(text: str) -> tuple[str, float, float, int]:
+def parse_preset(text: str) -> tuple[str, float, float, int, float]:
     parts = text.split(":")
     if len(parts) == 3:
         name, temp, top_k = parts
-        return name, float(temp), 1.0, int(top_k)
-    if len(parts) != 4:
+        return name, float(temp), 1.0, int(top_k), 0.0
+    if len(parts) == 4:
+        name, temp, top_p, top_k = parts
+        return name, float(temp), float(top_p), int(top_k), 0.0
+    if len(parts) == 5:
+        name, temp, top_p, top_k, min_p = parts
+        return name, float(temp), float(top_p), int(top_k), float(min_p)
+    else:
         raise argparse.ArgumentTypeError(
-            "preset must be name:temperature:top_p:top_k, e.g. tight:0.3:0.9:150")
-    name, temp, top_p, top_k = parts
-    return name, float(temp), float(top_p), int(top_k)
+            "preset must be name:temperature:top_p:top_k[:min_p], e.g. tight:0.3:0.9:300:0.1")
 
 
-def full_sampling_grid() -> list[tuple[str, float, float, int]]:
+def full_sampling_grid() -> list[tuple[str, float, float, int, float]]:
     presets = []
     for temp in GRID_TEMPS:
         for top_p in GRID_TOP_PS:
             for top_k in GRID_TOP_KS:
                 name = f"t{temp:g}_p{top_p:g}_k{top_k}"
-                presets.append((name, temp, top_p, top_k))
+                presets.append((name, temp, top_p, top_k, 0.0))
     return presets
 
 
@@ -191,7 +195,7 @@ def main() -> None:
             prefix = render_prompt(tokenizer, prompt)
             prefix_len = len(prefix)
 
-            for preset_idx, (preset_name, temperature, top_p, top_k) in enumerate(presets):
+            for preset_idx, (preset_name, temperature, top_p, top_k, min_p) in enumerate(presets):
                 seed = args.seed + p_idx * 1000 + preset_idx * 100
                 outputs, _masks = engine.generate_batch(
                     prefix,
@@ -200,6 +204,7 @@ def main() -> None:
                     temperature=temperature,
                     top_p=top_p,
                     top_k=top_k,
+                    min_p=min_p,
                     repetition_penalty=args.repetition_penalty,
                     seed=seed,
                 )
@@ -212,6 +217,7 @@ def main() -> None:
                         "temperature": temperature,
                         "top_p": top_p,
                         "top_k": top_k,
+                        "min_p": min_p,
                         "repetition_penalty": args.repetition_penalty,
                         "sample_idx": sample_idx,
                         "seed": seed,
@@ -220,7 +226,7 @@ def main() -> None:
                     rows.append(row)
                     jf.write(json.dumps(row, ensure_ascii=False) + "\n")
                     print(
-                        f"\n[{prompt_id} | {preset_name} | t={temperature} p={top_p} k={top_k} rp={args.repetition_penalty}]\n{response}")
+                        f"\n[{prompt_id} | {preset_name} | t={temperature} p={top_p} k={top_k} min_p={min_p} rp={args.repetition_penalty}]\n{response}")
 
     with open(md_path, "w", encoding="utf-8") as mf:
         mf.write(f"# Darija Chat Probe: {args.source}/{args.model_tag}@{args.step}\n\n")
@@ -229,7 +235,7 @@ def main() -> None:
             mf.write(f"**Prompt:** {item['prompt']}\n\n")
             for row in [r for r in rows if r["prompt_id"] == item["id"]]:
                 mf.write(
-                    f"### {row['preset']} (t={row['temperature']}, p={row['top_p']}, k={row['top_k']}, rp={row['repetition_penalty']}, sample={row['sample_idx']})\n\n")
+                    f"### {row['preset']} (t={row['temperature']}, p={row['top_p']}, k={row['top_k']}, min_p={row['min_p']}, rp={row['repetition_penalty']}, sample={row['sample_idx']})\n\n")
                 mf.write(row["response"].strip() + "\n\n")
 
     print(f"\nWrote {jsonl_path}")
