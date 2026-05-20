@@ -11,6 +11,7 @@ torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --device-batch-s
 
 from nanochat.report import get_report
 from tasks.darija_sft import MoroccanDarijaInstruct573K, TuluDarijaEnglish
+from tasks.toxic_classification import DarijaToxicClassification
 from tasks.common import TaskMixture
 from scripts.chat_eval import run_chat_eval
 from nanochat.engine import Engine
@@ -44,6 +45,9 @@ parser.add_argument("--model-tag", type=str, default=None,
                     help="model tag to load from")
 parser.add_argument("--model-step", type=int, default=None,
                     help="model step to load from")
+parser.add_argument("--model-source", "--source", dest="model_source",
+                    choices=["base", "sft"], default="base",
+                    help="checkpoint family to load from")
 parser.add_argument("--output-tag", type=str, default=None,
                     help="checkpoint tag to write SFT outputs to (default: --model-tag)")
 parser.add_argument("--load-optimizer", type=int, default=1,
@@ -87,10 +91,28 @@ parser.add_argument("--chatcore-max-sample", type=int, default=24,
 parser.add_argument("--save-every", type=int, default=-1,
                     help="save SFT checkpoint every N steps (-1 = final checkpoint only)")
 # Data mixture
+parser.add_argument("--task", choices=["darija_chat", "toxic_classification", "mixed"],
+                    default="darija_chat",
+                    help="SFT task mixture to train")
 parser.add_argument("--darija-instruct-epochs", type=int, default=1,
                     help="number of epochs of Lyte/Moroccan-Darija-Instruct-573K in training mixture")
 parser.add_argument("--darija-tulu-epochs", type=int, default=4,
                     help="number of epochs of GemMaroc/TULU-3-50k-darija-english in training mixture")
+parser.add_argument("--toxic-dataset", type=str,
+                    default="Lyte/darija-toxic-conversations-50k",
+                    help="HF repo id, local folder, or local file for translated toxicity data")
+parser.add_argument("--toxic-train-split", type=str, default="train")
+parser.add_argument("--toxic-val-split", type=str, default="test")
+parser.add_argument("--toxic-text-column", type=str, default="text_darija")
+parser.add_argument("--toxic-label-column", type=str, default="label_text")
+parser.add_argument("--toxic-epochs", type=int, default=1,
+                    help="number of epochs of toxicity classification rows in the training mixture")
+parser.add_argument("--toxic-balance", type=int, default=1,
+                    help="oversample toxic rows to roughly balance toxic/non-toxic labels")
+parser.add_argument("--toxic-multiplier", type=int, default=-1,
+                    help="explicit toxic oversampling multiplier (-1 = auto)")
+parser.add_argument("--toxic-max-examples", type=int, default=-1,
+                    help="optional cap for toxicity rows after balancing")
 args = parser.parse_args()
 user_config = vars(args).copy()
 # -----------------------------------------------------------------------------
@@ -121,7 +143,7 @@ if not HAS_FA3:
 
 # Load the model and tokenizer
 model, tokenizer, meta = load_model(
-    "base", device, phase="train", model_tag=args.model_tag, step=args.model_step)
+    args.model_source, device, phase="train", model_tag=args.model_tag, step=args.model_step)
 
 # Inherit training hyperparameters from pretrained checkpoint (None = inherit, explicit value = override)
 pretrain_user_config = meta.get("user_config", {})
@@ -174,7 +196,7 @@ optimizer = model.setup_optimizer(unembedding_lr=args.unembedding_lr,
 base_dir = get_base_dir()
 if args.load_optimizer:
     optimizer_data = load_optimizer_state(
-        "base", device, rank=ddp_rank, model_tag=args.model_tag, step=args.model_step)
+        args.model_source, device, rank=ddp_rank, model_tag=args.model_tag, step=args.model_step)
     if optimizer_data is not None:
         base_lrs = [group["lr"] for group in optimizer.param_groups]
         optimizer.load_state_dict(optimizer_data)
@@ -198,27 +220,65 @@ for group in optimizer.param_groups:
     group["initial_lr"] = group["lr"]
 
 # SFT data mixture and DataLoader
-train_tasks = [
-    # 573K total rows; ~544K train rows per epoch (train split)
-    *[MoroccanDarijaInstruct573K(split="train")
-      for _ in range(args.darija_instruct_epochs)],
-    # 44.7K rows per epoch
-    *[TuluDarijaEnglish(split="train")
-      for _ in range(args.darija_tulu_epochs)],
-]
+train_tasks = []
+val_tasks = []
+mixture_parts = []
+
+if args.task in {"darija_chat", "mixed"}:
+    train_tasks.extend([
+        # 573K total rows; ~544K train rows per epoch (train split)
+        *[MoroccanDarijaInstruct573K(split="train")
+          for _ in range(args.darija_instruct_epochs)],
+        # 44.7K rows per epoch
+        *[TuluDarijaEnglish(split="train")
+          for _ in range(args.darija_tulu_epochs)],
+    ])
+    # Note: MoroccanDarijaInstruct573K exposes a "test" split while
+    # TuluDarijaEnglish exposes a "validation" split.
+    val_tasks.extend([
+        MoroccanDarijaInstruct573K(split="test"),
+        TuluDarijaEnglish(split="validation"),
+    ])
+    mixture_parts.append(
+        f"Darija Instruct x{args.darija_instruct_epochs}, "
+        f"Darija Tulu x{args.darija_tulu_epochs}"
+    )
+
+if args.task in {"toxic_classification", "mixed"}:
+    toxic_multiplier = None if args.toxic_multiplier < 1 else args.toxic_multiplier
+    train_tasks.extend([
+        DarijaToxicClassification(
+            dataset=args.toxic_dataset,
+            split=args.toxic_train_split,
+            text_column=args.toxic_text_column,
+            label_column=args.toxic_label_column,
+            balance=bool(args.toxic_balance),
+            toxic_multiplier=toxic_multiplier,
+            max_examples=args.toxic_max_examples,
+        )
+        for _ in range(args.toxic_epochs)
+    ])
+    val_tasks.append(DarijaToxicClassification(
+        dataset=args.toxic_dataset,
+        split=args.toxic_val_split,
+        text_column=args.toxic_text_column,
+        label_column=args.toxic_label_column,
+        balance=False,
+    ))
+    balance_desc = "balanced" if args.toxic_balance else "natural"
+    mixture_parts.append(
+        f"ToxicClassification x{args.toxic_epochs} ({balance_desc})"
+    )
+
+if not train_tasks or not val_tasks:
+    raise ValueError(f"No train/validation tasks selected for --task {args.task!r}")
+
 train_dataset = TaskMixture(train_tasks)
+val_dataset = TaskMixture(val_tasks)
 print0(
     f"Training mixture: {len(train_dataset):,} rows "
-    f"(Darija Instruct x{args.darija_instruct_epochs}, "
-    f"Darija Tulu x{args.darija_tulu_epochs})"
+    f"({'; '.join(mixture_parts)})"
 )
-# Note: MoroccanDarijaInstruct573K exposes a "test" split while TuluDarijaEnglish
-# exposes a "validation" split. Both are used here as held-out evaluation data,
-# so we mix them into a single validation dataset.
-val_dataset = TaskMixture([
-    MoroccanDarijaInstruct573K(split="test"),
-    TuluDarijaEnglish(split="validation"),
-])
 # DataLoader is defined here, it emits inputs, targets : 2D tensors of shape (device_batch_size, max_seq_len)
 # A full-epoch SFT run does not know its final optimizer-step count in advance, so
 # the data generator reports dataset progress. Fixed --num-iterations runs are
