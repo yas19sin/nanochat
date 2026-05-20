@@ -7,7 +7,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import DynamicCache, PreTrainedModel
 from transformers.generation.utils import GenerationMixin
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.modeling_outputs import (
+    BaseModelOutputWithPast,
+    BaseModelOutputWithPooling,
+    CausalLMOutputWithPast,
+    SequenceClassifierOutput,
+)
 
 try:
     from .configuration_nanochat import NanochatConfig
@@ -506,3 +511,117 @@ class NanochatForCausalLM(NanochatPreTrainedModel, GenerationMixin):
             reordered.append((key_states.index_select(
                 0, beam_idx), value_states.index_select(0, beam_idx)))
         return tuple(reordered)
+
+
+def _pool_hidden_states(hidden_states, attention_mask=None, mode="last"):
+    if mode == "first":
+        return hidden_states[:, 0]
+    if attention_mask is None:
+        return hidden_states[:, -1] if mode == "last" else hidden_states.mean(dim=1)
+    mask = attention_mask.to(device=hidden_states.device, dtype=torch.long)
+    if mode == "last":
+        lengths = mask.sum(dim=1).clamp(min=1) - 1
+        batch = torch.arange(hidden_states.size(0), device=hidden_states.device)
+        return hidden_states[batch, lengths]
+    weights = mask.to(dtype=hidden_states.dtype).unsqueeze(-1)
+    return (hidden_states * weights).sum(dim=1) / weights.sum(dim=1).clamp(min=1)
+
+
+class NanochatForSequenceClassification(NanochatPreTrainedModel):
+    def __init__(self, config: NanochatConfig):
+        super().__init__(config)
+        self.num_labels = config.num_labels
+        self.model = NanochatModel(config)
+        self.score = nn.Linear(config.n_embd, config.num_labels)
+        self.pooling = getattr(config, "pooling", "last")
+
+    def get_input_embeddings(self) -> nn.Embedding:
+        return self.model.get_input_embeddings()
+
+    def set_input_embeddings(self, value: nn.Embedding) -> None:
+        self.model.set_input_embeddings(value)
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        **kwargs,
+    ):
+        return_dict = self.config.use_return_dict if return_dict is None else return_dict
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=output_hidden_states,
+            return_dict=True,
+            use_cache=False,
+            **kwargs,
+        )
+        pooled = _pool_hidden_states(
+            outputs.last_hidden_state, attention_mask, self.pooling)
+        logits = self.score(pooled).float()
+        loss = None
+        if labels is not None:
+            loss = F.cross_entropy(
+                logits.view(-1, self.num_labels), labels.view(-1))
+
+        if not return_dict:
+            result = (logits, outputs.hidden_states)
+            return ((loss,) + result) if loss is not None else result
+        return SequenceClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+        )
+
+
+class NanochatForTextEmbedding(NanochatPreTrainedModel):
+    def __init__(self, config: NanochatConfig):
+        super().__init__(config)
+        self.model = NanochatModel(config)
+        self.pooling = getattr(config, "embedding_pooling", "mean")
+        self.normalize_embeddings = getattr(config, "normalize_embeddings", True)
+        projection_dim = int(getattr(config, "projection_dim", 0) or 0)
+        self.projection = (
+            nn.Linear(config.n_embd, projection_dim, bias=False)
+            if projection_dim > 0
+            else nn.Identity()
+        )
+
+    def get_input_embeddings(self) -> nn.Embedding:
+        return self.model.get_input_embeddings()
+
+    def set_input_embeddings(self, value: nn.Embedding) -> None:
+        self.model.set_input_embeddings(value)
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        **kwargs,
+    ):
+        return_dict = self.config.use_return_dict if return_dict is None else return_dict
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=output_hidden_states,
+            return_dict=True,
+            use_cache=False,
+            **kwargs,
+        )
+        pooled = _pool_hidden_states(
+            outputs.last_hidden_state, attention_mask, self.pooling)
+        embeddings = self.projection(pooled).float()
+        if self.normalize_embeddings:
+            embeddings = F.normalize(embeddings, p=2, dim=-1)
+        if not return_dict:
+            return (outputs.last_hidden_state, embeddings, outputs.hidden_states)
+        return BaseModelOutputWithPooling(
+            last_hidden_state=outputs.last_hidden_state,
+            pooler_output=embeddings,
+            hidden_states=outputs.hidden_states,
+        )
