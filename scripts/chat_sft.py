@@ -10,7 +10,11 @@ torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --device-batch-s
 """
 
 from nanochat.report import get_report
-from tasks.darija_sft import MoroccanDarijaInstruct573K, TuluDarijaEnglish
+from tasks.darija_sft import (
+    DarijaStructuredTranslated,
+    MoroccanDarijaInstruct573K,
+    TuluDarijaEnglish,
+)
 from tasks.toxic_classification import DarijaToxicClassification
 from tasks.common import TaskMixture
 from scripts.chat_eval import run_chat_eval
@@ -98,6 +102,15 @@ parser.add_argument("--darija-instruct-epochs", type=int, default=1,
                     help="number of epochs of Lyte/Moroccan-Darija-Instruct-573K in training mixture")
 parser.add_argument("--darija-tulu-epochs", type=int, default=4,
                     help="number of epochs of GemMaroc/TULU-3-50k-darija-english in training mixture")
+parser.add_argument("--darija-structured-epochs", type=int, default=1,
+                    help="number of epochs of Lyte/darija-structured-translated in training mixture")
+parser.add_argument("--darija-structured-dataset", type=str,
+                    default="Lyte/darija-structured-translated")
+parser.add_argument("--darija-structured-column", type=str, default="dr")
+parser.add_argument("--darija-structured-train-split", type=str, default="train[:99%]",
+                    help="HF split expression for structured Q/A train rows")
+parser.add_argument("--darija-structured-val-split", type=str, default="train[99%:]",
+                    help="HF split expression for structured Q/A validation rows")
 parser.add_argument("--toxic-dataset", type=str,
                     default="Lyte/darija-toxic-conversations-50k",
                     help="HF repo id, local folder, or local file for translated toxicity data")
@@ -232,6 +245,11 @@ if args.task in {"darija_chat", "mixed"}:
         # 44.7K rows per epoch
         *[TuluDarijaEnglish(split="train")
           for _ in range(args.darija_tulu_epochs)],
+        *[DarijaStructuredTranslated(
+            split=args.darija_structured_train_split,
+            dataset_name=args.darija_structured_dataset,
+            column_name=args.darija_structured_column,
+        ) for _ in range(args.darija_structured_epochs)],
     ])
     # Note: MoroccanDarijaInstruct573K exposes a "test" split while
     # TuluDarijaEnglish exposes a "validation" split.
@@ -239,9 +257,16 @@ if args.task in {"darija_chat", "mixed"}:
         MoroccanDarijaInstruct573K(split="test"),
         TuluDarijaEnglish(split="validation"),
     ])
+    if args.darija_structured_epochs > 0:
+        val_tasks.append(DarijaStructuredTranslated(
+            split=args.darija_structured_val_split,
+            dataset_name=args.darija_structured_dataset,
+            column_name=args.darija_structured_column,
+        ))
     mixture_parts.append(
         f"Darija Instruct x{args.darija_instruct_epochs}, "
-        f"Darija Tulu x{args.darija_tulu_epochs}"
+        f"Darija Tulu x{args.darija_tulu_epochs}, "
+        f"Darija Structured x{args.darija_structured_epochs}"
     )
 
 if args.task in {"toxic_classification", "mixed"}:
