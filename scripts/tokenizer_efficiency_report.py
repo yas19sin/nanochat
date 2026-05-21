@@ -256,6 +256,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tokenizer-dir", type=Path, default=default_tokenizer_dir())
     parser.add_argument("--sample-file", type=Path, default=None,
                         help="Optional UTF-8 text file. Lines can be `name<TAB>text` or plain text.")
+    parser.add_argument("--samples-only", action="store_true",
+                        help="Skip corpus-level counts and only tokenize sample strings / inspect vocab.")
     parser.add_argument("--no-samples", action="store_true")
     parser.add_argument("--no-bos", action="store_true",
                         help="Do not prepend BOS for sample strings.")
@@ -269,16 +271,22 @@ def main() -> None:
     args = parse_args()
     args.data_dir = args.data_dir.resolve()
     args.tokenizer_dir = args.tokenizer_dir.resolve()
-    summary = load_counts(args)
-    report = build_report(summary)
-
     print("# Tokenizer Efficiency Report")
-    print(f"\nData: `{summary.get('settings', {}).get('data_dir', args.data_dir)}`")
-    print(f"Tokenizer: `{summary.get('settings', {}).get('tokenizer_dir', args.tokenizer_dir)}`")
-    print(f"BOS prepended in counts: `{summary.get('settings', {}).get('bos_prepended', 'unknown')}`")
-    print_table("Splits", report["splits"])
-    print_table("Train Groups", report["groups"])
-    print_table("Train Sources", report["sources"], include_group=True)
+    report: dict[str, Any] = {}
+    if args.samples_only:
+        print(f"\nData: `samples-only`")
+        print(f"Tokenizer: `{args.tokenizer_dir}`")
+        print(f"BOS prepended in counts: `not applicable`")
+    else:
+        summary = load_counts(args)
+        report = build_report(summary)
+
+        print(f"\nData: `{summary.get('settings', {}).get('data_dir', args.data_dir)}`")
+        print(f"Tokenizer: `{summary.get('settings', {}).get('tokenizer_dir', args.tokenizer_dir)}`")
+        print(f"BOS prepended in counts: `{summary.get('settings', {}).get('bos_prepended', 'unknown')}`")
+        print_table("Splits", report["splits"])
+        print_table("Train Groups", report["groups"])
+        print_table("Train Sources", report["sources"], include_group=True)
 
     if not args.no_samples or args.inspect_vocab:
         tokenizer = load_tokenizer(args.tokenizer_dir)
