@@ -26,6 +26,7 @@ import os
 import random
 import re
 import shutil
+import sys
 import time
 from collections import Counter
 from pathlib import Path
@@ -33,6 +34,9 @@ from typing import Any, Iterable
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.clean_pretraining_val import (
     exact_key,
@@ -264,6 +268,7 @@ def rewrite_train_file(
     schema = pa.schema([("text", pa.string())])
     writer = pq.ParquetWriter(tmp_path, schema)
     rows_in = rows_out = removed = chars = utf8_bytes = 0
+    pf = None
     try:
         pf = pq.ParquetFile(source_path)
         for batch in pf.iter_batches(columns=["text"], batch_size=batch_size):
@@ -284,6 +289,8 @@ def rewrite_train_file(
                 rows_out += len(kept)
     finally:
         writer.close()
+        if pf is not None and hasattr(pf, "close"):
+            pf.close()
 
     tmp_path.replace(output_path)
     return {
@@ -296,6 +303,18 @@ def rewrite_train_file(
         "utf8_bytes": utf8_bytes,
         "file_size_bytes": output_path.stat().st_size,
     }
+
+
+def backup_validation_file(data_dir: Path) -> Path | None:
+    val_path = data_dir / "zzzz_val_mix.parquet"
+    if not val_path.exists():
+        return None
+    backup_dir = data_dir / "_validation_backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    backup_path = backup_dir / f"zzzz_val_mix.before_rebuild.{stamp}.parquet"
+    shutil.copy2(val_path, backup_path)
+    return backup_path
 
 
 def prepare_output_dir(path: Path, overwrite: bool) -> None:
@@ -325,6 +344,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-docs", type=int, default=50_000)
     parser.add_argument("--source-fraction", action="append", default=[],
                         help="Override validation fraction, e.g. arabic_raw=0.20. May be repeated.")
+    parser.add_argument("--in-place", action="store_true",
+                        help="Rewrite SOURCE_DIR directly. Requires no full second copy, but train shards are replaced.")
     parser.add_argument("--validation-only", action="store_true",
                         help="Only write zzzz_val_mix.parquet to output-dir; does not remove rows from train.")
     parser.add_argument("--overwrite", action="store_true")
@@ -354,7 +375,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     args.source_dir = args.source_dir.resolve()
-    if args.output_dir is None:
+    if args.in_place:
+        if args.output_dir is not None:
+            raise SystemExit("--in-place cannot be combined with --output-dir")
+        args.output_dir = args.source_dir
+    elif args.output_dir is None:
         args.output_dir = args.source_dir.with_name(args.source_dir.name + "_valfix")
     args.output_dir = args.output_dir.resolve()
 
@@ -368,12 +393,17 @@ def main() -> None:
 
     print(f"Source: {args.source_dir}")
     print(f"Output: {args.output_dir}")
+    print(f"In-place: {args.in_place}")
     print(f"Validation-only: {args.validation_only}")
     print("Validation quotas:")
     for source, quota in sorted(quotas.items(), key=lambda item: item[0]):
         print(f"  - {source}: {quota:,}")
 
-    prepare_output_dir(args.output_dir, args.overwrite)
+    if args.in_place:
+        if not args.overwrite:
+            raise SystemExit("--in-place requires --overwrite to acknowledge replacing local data files.")
+    else:
+        prepare_output_dir(args.output_dir, args.overwrite)
 
     t0 = time.time()
     selected, holdout_keys, val_summary = make_validation(by_source, quotas, args)
@@ -381,8 +411,15 @@ def main() -> None:
         raise SystemExit("No validation rows selected; refusing to write empty validation.")
 
     val_path = args.output_dir / "zzzz_val_mix.parquet"
-    write_text_parquet(val_path, [item["text"] for item in selected], args.val_row_group_size)
-    print(f"  wrote {val_path} ({len(selected):,} rows)")
+    pending_val_path = val_path
+    validation_backup = None
+    if args.in_place:
+        validation_backup = backup_validation_file(args.output_dir)
+        if validation_backup:
+            print(f"  backed up existing validation to {validation_backup}")
+        pending_val_path = args.output_dir / "zzzz_val_mix.rebuild_pending.parquet"
+    write_text_parquet(pending_val_path, [item["text"] for item in selected], args.val_row_group_size)
+    print(f"  wrote {pending_val_path} ({len(selected):,} rows)")
 
     train_records: list[dict[str, Any]] = []
     if not args.validation_only:
@@ -405,6 +442,10 @@ def main() -> None:
                     flush=True,
                 )
 
+    if args.in_place:
+        pending_val_path.replace(val_path)
+        print(f"  replaced validation parquet: {val_path}")
+
     manifest = {
         "format": "nanochat_text_only_parquet",
         "kind": "validation_rebuild",
@@ -416,6 +457,8 @@ def main() -> None:
             "source_fractions": fractions,
             "validation_only": args.validation_only,
             "seed": args.seed,
+            "in_place": args.in_place,
+            "validation_backup": str(validation_backup) if validation_backup else None,
             "quality": {
                 "val_min_chars": args.val_min_chars,
                 "val_max_chars": args.val_max_chars,
