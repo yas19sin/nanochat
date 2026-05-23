@@ -6,28 +6,23 @@
 #   - Ubuntu 22.04 + CUDA 12.4+ driver
 #   - PyTorch base image preferred (pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel)
 #
-# Before running this script, upload the dataset + tokenizer to the box:
+# Data + tokenizer are auto-downloaded from HuggingFace:
+#   dataset:   Lyte/darija-nanochat-pretrain-mix     (~52 GB, ~101 parquet shards)
+#   tokenizer: Lyte/darija-nanochat-tokenizer-32k    (~10 MB)
 #
-#   # On YOUR machine (Windows PowerShell):
-#   $REMOTE="root@<vast-ip>:/workspace"
-#   $PORT=<vast-ssh-port>
-#   scp -P $PORT -r D:\Dev\AI\Datasets\nanochat-cache\pretrain_mix_darija_english $REMOTE/data/
-#   scp -P $PORT -r D:\Dev\AI\Datasets\nanochat-cache\tokenizer                   $REMOTE/data/
-#   scp -P $PORT -r D:\Dev\AI\Datasets\nanochat-cache\eval_bundle                 $REMOTE/data/
-#
-#   # ~52 GB data + ~1 GB tokenizer; at 800 Mbps upload ~10 min
-#
-# Then on the Vast box:
-#   export HF_TOKEN=hf_xxx        # only needed if you want to push the checkpoint to HF
+# Usage on the Vast box:
+#   export HF_TOKEN=hf_xxx        # needed if either repo is private; also lets us upload checkpoint
 #   export GITHUB_REPO=yas19sin/nanochat
 #   export WANDB_API_KEY=...      # optional, omit to run wandb offline
-#   bash vast_h100x2_darija_d8.sh
+#   git clone --depth 1 https://github.com/$GITHUB_REPO.git /workspace/nanochat
+#   bash /workspace/nanochat/runs/vast_h100x2_darija.sh
 
 set -euxo pipefail
 
 # -----------------------------------------------------------------------------
 # 0) env checks + paths
-: "${GITHUB_REPO:?set GITHUB_REPO, e.g. yas19sin/nanochat}"
+# GITHUB_REPO not required at runtime (clone is done before invoking this script),
+# but exported is fine: we use it for any HF checkpoint upload tagging.
 
 export NANOCHAT_BASE_DIR=/workspace/nanochat-cache
 export NANOCHAT_DATA_DIR=/workspace/data/pretrain_mix_darija_english
@@ -50,33 +45,51 @@ echo "=== nvidia-smi ==="
 nvidia-smi
 nvidia-smi --query-gpu=name,memory.total --format=csv
 
-echo "=== data check ==="
-N_SHARDS=$(ls "$NANOCHAT_DATA_DIR"/*.parquet 2>/dev/null | wc -l)
-echo "Found $N_SHARDS parquet shards in $NANOCHAT_DATA_DIR"
-if [ "$N_SHARDS" -lt 10 ]; then
-    echo "ERROR: dataset not uploaded. See header of this script for scp command."
-    exit 1
-fi
-ls "$NANOCHAT_TOKENIZER_DIR"/tokenizer.pkl >/dev/null \
-    || { echo "ERROR: tokenizer.pkl not found at $NANOCHAT_TOKENIZER_DIR"; exit 1; }
-
 # -----------------------------------------------------------------------------
-# 1) system deps + repo
+# 1) system deps + python env (uv) -- needed before we can call hf CLI
 apt-get update -y
 apt-get install -y --no-install-recommends git curl ca-certificates build-essential
 
-if [ ! -d /workspace/nanochat ]; then
-    git clone --depth 1 "https://github.com/${GITHUB_REPO}.git" /workspace/nanochat
-fi
 cd /workspace/nanochat
-
-# -----------------------------------------------------------------------------
-# 2) python env (uv)
 command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 [ -d .venv ] || uv venv
 uv sync --extra gpu
 source .venv/bin/activate
+
+# -----------------------------------------------------------------------------
+# 2) auto-download dataset + tokenizer from HF if not present
+HF_AUTH=()
+if [ -n "${HF_TOKEN:-}" ]; then
+    export HUGGINGFACE_HUB_TOKEN="$HF_TOKEN"
+    HF_AUTH=(--token "$HF_TOKEN")
+fi
+
+mkdir -p "$NANOCHAT_DATA_DIR" "$NANOCHAT_TOKENIZER_DIR"
+
+N_SHARDS=$(ls "$NANOCHAT_DATA_DIR"/*.parquet 2>/dev/null | wc -l)
+if [ "$N_SHARDS" -lt 50 ]; then
+    echo "=== downloading dataset from HF (Lyte/darija-nanochat-pretrain-mix) ==="
+    hf download Lyte/darija-nanochat-pretrain-mix \
+        --repo-type dataset \
+        --local-dir "$NANOCHAT_DATA_DIR" \
+        "${HF_AUTH[@]}"
+    # flatten if HF dumped files into a subdir
+    find "$NANOCHAT_DATA_DIR" -mindepth 2 -name "*.parquet" \
+        -exec mv -n {} "$NANOCHAT_DATA_DIR"/ \;
+fi
+N_SHARDS=$(ls "$NANOCHAT_DATA_DIR"/*.parquet 2>/dev/null | wc -l)
+echo "Found $N_SHARDS parquet shards in $NANOCHAT_DATA_DIR"
+[ "$N_SHARDS" -ge 50 ] || { echo "ERROR: dataset download failed"; exit 1; }
+
+if [ ! -f "$NANOCHAT_TOKENIZER_DIR/tokenizer.pkl" ]; then
+    echo "=== downloading tokenizer from HF (Lyte/darija-nanochat-tokenizer-32k) ==="
+    hf download Lyte/darija-nanochat-tokenizer-32k \
+        --local-dir "$NANOCHAT_TOKENIZER_DIR" \
+        "${HF_AUTH[@]}"
+fi
+[ -f "$NANOCHAT_TOKENIZER_DIR/tokenizer.pkl" ] \
+    || { echo "ERROR: tokenizer.pkl missing after download"; exit 1; }
 
 # Sanity: confirm FA3 is available on Hopper
 python -c "
