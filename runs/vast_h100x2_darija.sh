@@ -26,7 +26,8 @@ set -euxo pipefail
 
 export NANOCHAT_BASE_DIR=/workspace/nanochat-cache
 export NANOCHAT_DATA_DIR=/workspace/data/pretrain_mix_darija_english
-export NANOCHAT_TOKENIZER_DIR=/workspace/data/tokenizer
+# get_tokenizer() reads $NANOCHAT_BASE_DIR/tokenizer, not a separate env var.
+export NANOCHAT_TOKENIZER_DIR="$NANOCHAT_BASE_DIR/tokenizer"
 export OMP_NUM_THREADS=1
 export TORCHINDUCTOR_COMPILE_THREADS=8
 unset TORCH_COMPILE_DISABLE 2>/dev/null || true
@@ -119,7 +120,7 @@ python -m nanochat.report reset
 # Data: num-iterations=46000 -> ~24B trained tokens = one full epoch over the mix
 #   (262144 * 92000 == 524288 * 46000 == 24.1B trained tokens)
 
-DEPTH="${DEPTH:-12}"
+DEPTH="${DEPTH:-10}"
 
 torchrun --standalone --nproc_per_node=2 -m scripts.base_train -- \
     --depth="$DEPTH" \
@@ -154,7 +155,7 @@ if [ -n "${HF_TOKEN:-}" ] && [ -n "${HF_USER:-}" ]; then
     export HUGGINGFACE_HUB_TOKEN="$HF_TOKEN"
     LATEST_CKPT=$(ls -td "$NANOCHAT_BASE_DIR"/checkpoints/*/ | head -1)
     python -m huggingface_hub.commands.huggingface_cli upload \
-        "${HF_USER}/nanochat-d8-darija-mix" \
+        "${HF_USER}/nanochat-d${DEPTH}-darija-mix" \
         "$LATEST_CKPT" \
         . \
         --token "$HF_TOKEN" || echo "upload failed (continuing)"
