@@ -94,10 +94,10 @@ fi
 # Sanity: confirm FA3 is available on Hopper
 python -c "
 import torch
-from nanochat.flash_attention import HAS_FLASH_ATTN_3
+from nanochat.flash_attention import HAS_FA3
 print('CUDA:', torch.version.cuda, 'GPUs:', torch.cuda.device_count())
 print('SM:', torch.cuda.get_device_capability(0))
-print('FA3 available:', HAS_FLASH_ATTN_3)
+print('FA3 available:', HAS_FA3)
 "
 
 python -m nanochat.report reset
