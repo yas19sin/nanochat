@@ -68,7 +68,7 @@ fi
 
 mkdir -p "$NANOCHAT_DATA_DIR" "$NANOCHAT_TOKENIZER_DIR"
 
-N_SHARDS=$(ls "$NANOCHAT_DATA_DIR"/*.parquet 2>/dev/null | wc -l)
+N_SHARDS=$(find "$NANOCHAT_DATA_DIR" -maxdepth 1 -name "*.parquet" 2>/dev/null | wc -l)
 if [ "$N_SHARDS" -lt 50 ]; then
     echo "=== downloading dataset from HF (Lyte/darija-nanochat-pretrain-mix) ==="
     hf download Lyte/darija-nanochat-pretrain-mix \
@@ -79,7 +79,7 @@ if [ "$N_SHARDS" -lt 50 ]; then
     find "$NANOCHAT_DATA_DIR" -mindepth 2 -name "*.parquet" \
         -exec mv -n {} "$NANOCHAT_DATA_DIR"/ \;
 fi
-N_SHARDS=$(ls "$NANOCHAT_DATA_DIR"/*.parquet 2>/dev/null | wc -l)
+N_SHARDS=$(find "$NANOCHAT_DATA_DIR" -maxdepth 1 -name "*.parquet" 2>/dev/null | wc -l)
 echo "Found $N_SHARDS parquet shards in $NANOCHAT_DATA_DIR"
 [ "$N_SHARDS" -ge 50 ] || { echo "ERROR: dataset download failed"; exit 1; }
 
