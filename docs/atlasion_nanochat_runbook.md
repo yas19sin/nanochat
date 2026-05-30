@@ -629,7 +629,7 @@ torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft \
   --load-optimizer 0 \
   --init-lr-frac 0.1 \
   --darija-instruct-epochs 1 \
-  --darija-tulu-epochs 4 \
+  --darija-tulu-epochs 1 \
   --darija-structured-epochs 1
 ```
 
@@ -720,8 +720,50 @@ Adjust `--step` to the checkpoint you actually want.
 Instruction datasets used:
 
 - `Lyte/Moroccan-Darija-Instruct-573K`
+- `Lyte/Moroccan-Darija-Instruct-573K-English`
 - `GemMaroc/TULU-3-50k-darija-english`
 - `Lyte/darija-structured-translated`, column `dr`
+
+The English companion dataset is opt-in. It has paired columns:
+
+- `english_question` -> `darija_answer` for English-input/Darija-output QA
+- `english_answer` -> `darija_answer` for direct translation supervision
+- `english_question` -> `darija_question` for question translation supervision
+
+For the 200M A100 checkpoint, the aggressive cross-lingual SFT attempt keeps
+the 1K base context and adds both English QA and English-answer translation:
+
+```bash
+export NANOCHAT_BASE_DIR=/workspace/nanochat-cache
+export HF_TOKEN="$HF_TOKEN"
+
+torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- \
+  --model-source base \
+  --model-tag d10_darija_a100 \
+  --model-step 27000 \
+  --output-tag AtlasionNano-200M-Instruct-b64k-enqa-trans \
+  --run AtlasionNano-200M-Instruct-b64k-enqa-trans \
+  --task darija_chat \
+  --num-iterations -1 \
+  --max-seq-len 1024 \
+  --device-batch-size 8 \
+  --total-batch-size 65536 \
+  --eval-every 500 \
+  --eval-tokens 4194304 \
+  --chatcore-every -1 \
+  --save-every 500 \
+  --load-optimizer 0 \
+  --init-lr-frac 0.05 \
+  --darija-instruct-epochs 1 \
+  --darija-english-qa-epochs 1 \
+  --darija-english-translate-answer-epochs 1 \
+  --darija-english-translate-question-epochs 0 \
+  --darija-tulu-epochs 1 \
+  --darija-structured-epochs 1
+```
+
+Use `--darija-english-max-examples 100000` to do a smaller probe before the
+full paired run.
 
 The structured dataset rows use Markdown blocks:
 

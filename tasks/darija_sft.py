@@ -2,6 +2,7 @@
 Darija SFT datasets from HuggingFace.
 
 - Lyte/Moroccan-Darija-Instruct-573K: column `messages`
+- Lyte/Moroccan-Darija-Instruct-573K-English: paired Darija/English Q/A columns
 - GemMaroc/TULU-3-50k-darija-english: column `dialogs`
 - Lyte/darija-structured-translated: column `dr`, Markdown Q/A format
 """
@@ -130,6 +131,93 @@ class MoroccanDarijaInstruct573K(HFConversationTask):
             column_name="messages",
             **kwargs,
         )
+
+
+class MoroccanDarijaInstruct573KEnglish(Task):
+    MODES = {
+        "qa": {
+            "source_column": "english_question",
+            "target_column": "darija_answer",
+            "prompt_template": "Answer in Moroccan Darija. جاوب بالدارجة المغربية:\n{english_question}",
+        },
+        "translate_answer": {
+            "source_column": "english_answer",
+            "target_column": "darija_answer",
+            "prompt_template": "Translate this to Moroccan Darija. ترجم للدارجة المغربية:\n{english_answer}",
+        },
+        "translate_question": {
+            "source_column": "english_question",
+            "target_column": "darija_question",
+            "prompt_template": "Translate this question to Moroccan Darija. ترجم هاد السؤال للدارجة المغربية:\n{english_question}",
+        },
+    }
+
+    def __init__(
+        self,
+        split,
+        dataset_name="Lyte/Moroccan-Darija-Instruct-573K-English",
+        mode="qa",
+        prompt_template=None,
+        max_examples=-1,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        if mode not in self.MODES:
+            raise ValueError(
+                f"Unknown English Darija mode {mode!r}; expected one of {sorted(self.MODES)}"
+            )
+        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+        load_kwargs = {"split": split}
+        if token:
+            load_kwargs["token"] = token
+        try:
+            self.ds = load_dataset(dataset_name, **load_kwargs)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load dataset {dataset_name} with split {split}: {e}"
+            ) from e
+
+        self.mode = mode
+        self.source_column = self.MODES[mode]["source_column"]
+        self.target_column = self.MODES[mode]["target_column"]
+        self.prompt_template = prompt_template or self.MODES[mode]["prompt_template"]
+        self.valid_indices = []
+        for idx, row in enumerate(self.ds):
+            source = row.get(self.source_column)
+            target = row.get(self.target_column)
+            if isinstance(source, str) and source.strip() and isinstance(target, str) and target.strip():
+                self.valid_indices.append(idx)
+                if max_examples > 0 and len(self.valid_indices) >= max_examples:
+                    break
+
+        if not self.valid_indices:
+            raise RuntimeError(
+                f"No usable rows found in {dataset_name} split {split!r} for mode {mode!r} "
+                f"with source {self.source_column!r} and target {self.target_column!r}"
+            )
+
+    @property
+    def eval_type(self):
+        return "generative"
+
+    def num_examples(self):
+        return len(self.valid_indices)
+
+    def get_example(self, index):
+        row = dict(self.ds[self.valid_indices[index]])
+        row = {key: value.strip() if isinstance(value, str) else value for key, value in row.items()}
+        try:
+            prompt = self.prompt_template.format(**row)
+        except KeyError as e:
+            raise KeyError(
+                f"Prompt template references missing column {e} for English Darija mode {self.mode!r}"
+            ) from e
+        return {
+            "messages": [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": row[self.target_column]},
+            ]
+        }
 
 
 class TuluDarijaEnglish(HFConversationTask):

@@ -13,6 +13,7 @@ from nanochat.report import get_report
 from tasks.darija_sft import (
     DarijaStructuredTranslated,
     MoroccanDarijaInstruct573K,
+    MoroccanDarijaInstruct573KEnglish,
     TuluDarijaEnglish,
 )
 from tasks.toxic_classification import DarijaToxicClassification
@@ -100,6 +101,30 @@ parser.add_argument("--task", choices=["darija_chat", "toxic_classification", "m
                     help="SFT task mixture to train")
 parser.add_argument("--darija-instruct-epochs", type=int, default=1,
                     help="number of epochs of Lyte/Moroccan-Darija-Instruct-573K in training mixture")
+parser.add_argument("--darija-english-dataset", type=str,
+                    default="Lyte/Moroccan-Darija-Instruct-573K-English",
+                    help="paired English/Darija instruction dataset")
+parser.add_argument("--darija-english-train-split", type=str, default="train[:99%]",
+                    help="train slice for paired English/Darija instruction dataset")
+parser.add_argument("--darija-english-val-split", type=str, default="train[99%:]",
+                    help="validation slice for paired English/Darija instruction dataset")
+parser.add_argument("--darija-english-max-examples", type=int, default=-1,
+                    help="optional cap per English/Darija task mode after filtering (-1 = all)")
+parser.add_argument("--darija-english-qa-epochs", type=int, default=0,
+                    help="epochs of English question -> Darija answer pairs")
+parser.add_argument("--darija-english-translate-answer-epochs", type=int, default=0,
+                    help="epochs of English answer -> Darija answer translation pairs")
+parser.add_argument("--darija-english-translate-question-epochs", type=int, default=0,
+                    help="epochs of English question -> Darija question translation pairs")
+parser.add_argument("--darija-english-qa-prompt", type=str,
+                    default="Answer in Moroccan Darija. جاوب بالدارجة المغربية:\n{english_question}",
+                    help="prompt template for English question -> Darija answer; can reference dataset columns")
+parser.add_argument("--darija-english-translate-answer-prompt", type=str,
+                    default="Translate this to Moroccan Darija. ترجم للدارجة المغربية:\n{english_answer}",
+                    help="prompt template for English answer -> Darija answer; can reference dataset columns")
+parser.add_argument("--darija-english-translate-question-prompt", type=str,
+                    default="Translate this question to Moroccan Darija. ترجم هاد السؤال للدارجة المغربية:\n{english_question}",
+                    help="prompt template for English question -> Darija question; can reference dataset columns")
 parser.add_argument("--darija-tulu-epochs", type=int, default=4,
                     help="number of epochs of GemMaroc/TULU-3-50k-darija-english in training mixture")
 parser.add_argument("--darija-structured-epochs", type=int, default=1,
@@ -242,6 +267,27 @@ if args.task in {"darija_chat", "mixed"}:
         # 573K total rows; ~544K train rows per epoch (train split)
         *[MoroccanDarijaInstruct573K(split="train")
           for _ in range(args.darija_instruct_epochs)],
+        *[MoroccanDarijaInstruct573KEnglish(
+            split=args.darija_english_train_split,
+            dataset_name=args.darija_english_dataset,
+            mode="qa",
+            prompt_template=args.darija_english_qa_prompt,
+            max_examples=args.darija_english_max_examples,
+        ) for _ in range(args.darija_english_qa_epochs)],
+        *[MoroccanDarijaInstruct573KEnglish(
+            split=args.darija_english_train_split,
+            dataset_name=args.darija_english_dataset,
+            mode="translate_answer",
+            prompt_template=args.darija_english_translate_answer_prompt,
+            max_examples=args.darija_english_max_examples,
+        ) for _ in range(args.darija_english_translate_answer_epochs)],
+        *[MoroccanDarijaInstruct573KEnglish(
+            split=args.darija_english_train_split,
+            dataset_name=args.darija_english_dataset,
+            mode="translate_question",
+            prompt_template=args.darija_english_translate_question_prompt,
+            max_examples=args.darija_english_max_examples,
+        ) for _ in range(args.darija_english_translate_question_epochs)],
         # 44.7K rows per epoch
         *[TuluDarijaEnglish(split="train")
           for _ in range(args.darija_tulu_epochs)],
@@ -257,6 +303,30 @@ if args.task in {"darija_chat", "mixed"}:
         MoroccanDarijaInstruct573K(split="test"),
         TuluDarijaEnglish(split="validation"),
     ])
+    if args.darija_english_qa_epochs > 0:
+        val_tasks.append(MoroccanDarijaInstruct573KEnglish(
+            split=args.darija_english_val_split,
+            dataset_name=args.darija_english_dataset,
+            mode="qa",
+            prompt_template=args.darija_english_qa_prompt,
+            max_examples=args.darija_english_max_examples,
+        ))
+    if args.darija_english_translate_answer_epochs > 0:
+        val_tasks.append(MoroccanDarijaInstruct573KEnglish(
+            split=args.darija_english_val_split,
+            dataset_name=args.darija_english_dataset,
+            mode="translate_answer",
+            prompt_template=args.darija_english_translate_answer_prompt,
+            max_examples=args.darija_english_max_examples,
+        ))
+    if args.darija_english_translate_question_epochs > 0:
+        val_tasks.append(MoroccanDarijaInstruct573KEnglish(
+            split=args.darija_english_val_split,
+            dataset_name=args.darija_english_dataset,
+            mode="translate_question",
+            prompt_template=args.darija_english_translate_question_prompt,
+            max_examples=args.darija_english_max_examples,
+        ))
     if args.darija_structured_epochs > 0:
         val_tasks.append(DarijaStructuredTranslated(
             split=args.darija_structured_val_split,
@@ -265,6 +335,9 @@ if args.task in {"darija_chat", "mixed"}:
         ))
     mixture_parts.append(
         f"Darija Instruct x{args.darija_instruct_epochs}, "
+        f"Darija English QA x{args.darija_english_qa_epochs}, "
+        f"Darija English translation-answer x{args.darija_english_translate_answer_epochs}, "
+        f"Darija English translation-question x{args.darija_english_translate_question_epochs}, "
         f"Darija Tulu x{args.darija_tulu_epochs}, "
         f"Darija Structured x{args.darija_structured_epochs}"
     )
