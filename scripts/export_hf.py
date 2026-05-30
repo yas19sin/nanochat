@@ -146,31 +146,43 @@ def format_param_count(n: int) -> str:
     return str(n)
 
 
-def write_generation_config(output_dir: Path, source: str, eos_token_id: int | None, pad_token_id: int) -> None:
+def write_generation_config(
+    output_dir: Path,
+    source: str,
+    bos_token_id: int,
+    eos_token_id: int | None,
+    pad_token_id: int,
+) -> None:
     if source == "base":
         config = GenerationConfig(
-            max_new_tokens=256,
+            max_new_tokens=128,
             do_sample=True,
-            temperature=0.3,
-            top_k=300,
-            top_p=0.90,
-            min_p=0.1,
-            repetition_penalty=1.1,
+            temperature=0.5,
+            top_k=100,
+            top_p=0.95,
+            min_p=0.0,
+            repetition_penalty=1.15,
+            no_repeat_ngram_size=3,
             pad_token_id=pad_token_id,
             eos_token_id=eos_token_id,
             use_cache=False,
         )
     else:
+        stop_ids = (
+            [eos_token_id, bos_token_id]
+            if eos_token_id is not None else bos_token_id
+        )
         config = GenerationConfig(
-            max_new_tokens=256,
+            max_new_tokens=96,
             do_sample=True,
-            temperature=0.3,
-            top_k=300,
-            top_p=0.90,
-            min_p=0.1,
-            repetition_penalty=1.1,
+            temperature=0.35,
+            top_k=100,
+            top_p=0.95,
+            min_p=0.0,
+            repetition_penalty=1.25,
+            no_repeat_ngram_size=3,
             pad_token_id=pad_token_id,
-            eos_token_id=eos_token_id,
+            eos_token_id=stop_ids,
             use_cache=False,
         )
     config.save_pretrained(output_dir)
@@ -202,29 +214,38 @@ messages = [{"role": "user", "content": "جاوبني بالدارجة: شنو �
 inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt").to(model.device)
 if not hasattr(inputs, "shape"):
     inputs = inputs["input_ids"]
+assistant_end_id = tokenizer.convert_tokens_to_ids("<|assistant_end|>")
+bos_id = tokenizer.convert_tokens_to_ids("<|bos|>")
 outputs = model.generate(
     inputs,
-    max_new_tokens=256,
-    temperature=0.3,
-    top_k=300,
-    top_p=0.9,
-    min_p=0.1,
-    repetition_penalty=1.1,
+    max_new_tokens=96,
+    temperature=0.35,
+    top_k=100,
+    top_p=0.95,
+    min_p=0.0,
+    repetition_penalty=1.25,
+    no_repeat_ngram_size=3,
     do_sample=True,
+    eos_token_id=[assistant_end_id, bos_id],
+    pad_token_id=bos_id,
 )
 print(tokenizer.decode(outputs[0], skip_special_tokens=False))
 """
     base_usage = """
 inputs = tokenizer("المغرب بلد", return_tensors="pt").to(model.device)
+bos_id = tokenizer.convert_tokens_to_ids("<|bos|>")
 outputs = model.generate(
     **inputs,
     max_new_tokens=128,
-    temperature=0.3,
-    top_k=300,
-    top_p=0.9,
-    min_p=0.1,
-    repetition_penalty=1.1,
+    temperature=0.5,
+    top_k=100,
+    top_p=0.95,
+    min_p=0.0,
+    repetition_penalty=1.15,
+    no_repeat_ngram_size=3,
     do_sample=True,
+    eos_token_id=bos_id,
+    pad_token_id=bos_id,
 )
 print(tokenizer.decode(outputs[0], skip_special_tokens=False))
 """
@@ -446,7 +467,7 @@ def export_checkpoint(
     export_tokenizer(tokenizer_dir, output_dir,
                      bos_token=bos_token, eos_token=eos_token, pad_token=pad_token)
     model.save_pretrained(output_dir, safe_serialization=True)
-    write_generation_config(output_dir, source, eos_token_id, pad_token_id)
+    write_generation_config(output_dir, source, bos_token_id, eos_token_id, pad_token_id)
 
     export_meta = {
         "checkpoint_dir": str(checkpoint_dir),
