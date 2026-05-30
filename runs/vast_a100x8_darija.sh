@@ -110,10 +110,9 @@ python -m nanochat.report reset
 # Model: depth=10 (~200M params, n_embd=768, n_head=6, n_layer=10)
 #
 # Batch sizing on 8x A100 SXM (80GB each):
-#   - device-batch-size=48 -> 48*1024*8 = 393216 tokens/step (no grad accum needed)
-#   - total-batch-size=524288 -> grad_accum=2 with dbs=32, or ~1 with dbs=64
-#   - 80GB VRAM fits dbs=48 comfortably at d=10 with SDPA + bf16
-#   - Using dbs=32 with total-batch-size=524288 -> grad_accum=2
+#   - device-batch-size=64 -> 64*1024*8 = 524288 tokens/step
+#   - total-batch-size=524288 -> grad_accum=1
+#   - 80GB VRAM fits dbs=64 comfortably at d=10 with SDPA + bf16
 #
 # Window pattern: L (full context) — SDPA has no efficient sliding window support.
 #
@@ -126,7 +125,7 @@ torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \
     --model-tag="d${DEPTH}_darija_a100" \
     --run="d${DEPTH}_darija_a100" \
     --max-seq-len=1024 \
-    --device-batch-size=32 \
+    --device-batch-size=64 \
     --total-batch-size=524288 \
     --num-iterations=46000 \
     --eval-every=1000 \
@@ -139,7 +138,7 @@ torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \
 # -----------------------------------------------------------------------------
 # 4) base eval
 torchrun --standalone --nproc_per_node=8 -m scripts.base_eval -- \
-    --device-batch-size=32
+    --device-batch-size=64
 
 # -----------------------------------------------------------------------------
 # 5) report + optional checkpoint upload
