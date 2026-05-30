@@ -56,6 +56,7 @@ parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding 
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
 parser.add_argument("--target-param-data-ratio", type=float, default=12, help="calculate num_iterations to maintain data:param ratio (Chinchilla=20, -1 = disable)")
+parser.add_argument("--stop-after-data-epoch", type=int, default=-1, help="early-stop and save after the dataloader first completes this many full data epochs (-1 = disable)")
 # Optimization
 parser.add_argument("--device-batch-size", type=int, default=32, help="per-device batch size. good number to reduce to 16,8,4,... if you OOM on VRAM.")
 parser.add_argument("--total-batch-size", type=int, default=-1, help="total batch size in tokens. decent numbers are e.g. 524288. (-1 = auto-compute optimal)")
@@ -351,10 +352,12 @@ elif args.target_param_data_ratio > 0:
     print0(f"Calculated number of iterations from target data:param ratio: {num_iterations:,}")
 else:
     raise ValueError("No training horizon specified")
-total_tokens = total_batch_size * num_iterations # the actual number of tokens we will train for
-print0(f"Total number of training tokens: {total_tokens:,}")
+planned_total_tokens = total_batch_size * num_iterations # upper bound when early data-epoch stopping is enabled
+print0(f"Total number of training tokens: {planned_total_tokens:,}")
 print0(f"Tokens : Scaling params ratio: {total_batch_size * num_iterations / num_scaling_params:.2f}") # e.g. Chinchilla was ~20
-print0(f"Total training FLOPs estimate: {num_flops_per_token * total_tokens:e}")
+print0(f"Total training FLOPs estimate: {num_flops_per_token * planned_total_tokens:e}")
+if args.stop_after_data_epoch > 0:
+    print0(f"Early stopping enabled: save and stop after data epoch {args.stop_after_data_epoch}")
 
 # Learning rate schedule (linear warmup, constant, linear warmdown)
 def get_lr_multiplier(it):
@@ -413,8 +416,9 @@ print0(f"Tokens / micro-batch: {world_tokens_per_fwdbwd:,}")
 print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
 
 # Go!
+stop_due_to_data_epoch = False
 while True:
-    last_step = step == num_iterations # loop runs num_iterations+1 times so that we can eval/save at the end
+    last_step = step == num_iterations or stop_due_to_data_epoch # loop runs num_iterations+1 times so that we can eval/save at the end
     flops_so_far = num_flops_per_token * total_batch_size * step
 
     # once in a while: evaluate the val bpb (all ranks participate)
@@ -579,6 +583,16 @@ while True:
         }
         wandb_run.log(log_data)
 
+    if (
+        args.stop_after_data_epoch > 0
+        and dataloader_state_dict["epoch"] > args.stop_after_data_epoch
+    ):
+        stop_due_to_data_epoch = True
+        print0(
+            f"Data epoch {args.stop_after_data_epoch} complete; "
+            f"saving and stopping before training on epoch {dataloader_state_dict['epoch']}."
+        )
+
     # state update
     first_step_of_run = (step == 0) or (resuming and step == args.resume_from_step)
     step += 1
@@ -596,6 +610,8 @@ while True:
 # print a few more stats
 print0(f"Peak memory usage: {get_max_memory() / 1024 / 1024:.2f}MiB")
 print0(f"Total training time: {total_training_time/60:.2f}m")
+actual_training_tokens = total_batch_size * step
+print0(f"Actual number of training tokens: {actual_training_tokens:,}")
 if val_bpb is not None:
     print0(f"Minimum validation bpb: {min_val_bpb:.6f}")
 
@@ -607,12 +623,16 @@ get_report().log(section="Base model training", data=[
         "Number of parameters": num_params,
         "Number of FLOPs per token": f"{num_flops_per_token:e}",
         "Calculated number of iterations": num_iterations,
-        "Number of training tokens": total_tokens,
-        "Tokens : Scaling params ratio": total_batch_size * num_iterations / num_scaling_params,
+        "Planned number of training tokens": planned_total_tokens,
+        "Actual number of training tokens": actual_training_tokens,
+        "Actual optimizer steps": step,
+        "Planned tokens : Scaling params ratio": planned_total_tokens / num_scaling_params,
+        "Actual tokens : Scaling params ratio": actual_training_tokens / num_scaling_params,
         "DDP world size": ddp_world_size,
         "warmup_steps": args.warmup_steps,
         "warmdown_ratio": args.warmdown_ratio,
         "final_lr_frac": args.final_lr_frac,
+        "stop_after_data_epoch": args.stop_after_data_epoch,
     },
     { # stats about training outcomes
         "Minimum validation bpb": min_val_bpb if val_bpb is not None else None,

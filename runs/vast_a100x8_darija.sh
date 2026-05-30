@@ -14,7 +14,9 @@
 #   tokenizer: Lyte/darija-nanochat-tokenizer-32k    (~10 MB)
 #
 # Usage on the Vast box:
-#   export HF_TOKEN=hf_xxx        # needed if either repo is private; also lets us upload checkpoint
+#   export HF_TOKEN=hf_xxx        # needed if either repo is private; also lets us upload HF model
+#   export HF_USER=your_hf_user   # optional: default HF model repo owner
+#   export HF_MODEL_REPO=Lyte/nanochat-d10-darija-a100-base  # optional override
 #   export GITHUB_REPO=yas19sin/nanochat
 #   export WANDB_API_KEY=...      # optional, omit to run wandb offline
 #   git clone --depth 1 https://github.com/$GITHUB_REPO.git /workspace/nanochat
@@ -116,7 +118,8 @@ python -m nanochat.report reset
 #
 # Window pattern: L (full context) — SDPA has no efficient sliding window support.
 #
-# Data: num-iterations=46000 -> ~24B trained tokens = one full epoch over the mix
+# Data: stop-after-data-epoch=1 saves as soon as the sorted parquet curriculum
+# wraps to epoch 2. num-iterations=46000 remains a safety ceiling and LR schedule.
 
 DEPTH="${DEPTH:-10}"
 
@@ -128,6 +131,7 @@ torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \
     --device-batch-size=64 \
     --total-batch-size=524288 \
     --num-iterations=46000 \
+    --stop-after-data-epoch=1 \
     --eval-every=1000 \
     --eval-tokens=524288 \
     --core-metric-every=500 \
@@ -141,22 +145,35 @@ torchrun --standalone --nproc_per_node=8 -m scripts.base_eval -- \
     --device-batch-size=64
 
 # -----------------------------------------------------------------------------
-# 5) report + optional checkpoint upload
+# 5) report + optional HF-compatible model export/upload
 python -m nanochat.report generate
 
 echo ""
 echo "=== checkpoints ==="
-ls -lh "$NANOCHAT_BASE_DIR"/checkpoints/ || true
+ls -lh "$NANOCHAT_BASE_DIR"/base_checkpoints/ || true
 
-if [ -n "${HF_TOKEN:-}" ] && [ -n "${HF_USER:-}" ]; then
-    echo "=== uploading checkpoint to HF ==="
+HF_MODEL_REPO="${HF_MODEL_REPO:-}"
+if [ -z "$HF_MODEL_REPO" ] && [ -n "${HF_USER:-}" ]; then
+    HF_MODEL_REPO="${HF_USER}/nanochat-d${DEPTH}-darija-a100-base"
+fi
+
+if [ -n "${HF_TOKEN:-}" ] && [ -n "$HF_MODEL_REPO" ]; then
+    echo "=== exporting and uploading HF-compatible model to $HF_MODEL_REPO ==="
     export HUGGINGFACE_HUB_TOKEN="$HF_TOKEN"
-    LATEST_CKPT=$(ls -td "$NANOCHAT_BASE_DIR"/checkpoints/*/ | head -1)
-    python -m huggingface_hub.commands.huggingface_cli upload \
-        "${HF_USER}/nanochat-d${DEPTH}-darija-a100" \
-        "$LATEST_CKPT" \
-        . \
-        --commit-message "d${DEPTH} darija pretrain checkpoint (A100x8)"
+    HF_PRIVATE_ARGS=(--private)
+    if [ "${HF_MODEL_PUBLIC:-0}" = "1" ]; then
+        HF_PRIVATE_ARGS=()
+    fi
+    python -m scripts.export_hf \
+        --source base \
+        --model-tag "d${DEPTH}_darija_a100" \
+        --output-dir "$NANOCHAT_BASE_DIR/hf_exports/nanochat-d${DEPTH}-darija-a100-base" \
+        --dtype bfloat16 \
+        --push-to-hub "$HF_MODEL_REPO" \
+        "${HF_PRIVATE_ARGS[@]}" \
+        --commit-message "Export d${DEPTH} Darija A100 base checkpoint"
+else
+    echo "HF-compatible model upload skipped. Set HF_TOKEN and HF_MODEL_REPO (or HF_USER) to enable it."
 fi
 
 echo "=== DONE ==="
