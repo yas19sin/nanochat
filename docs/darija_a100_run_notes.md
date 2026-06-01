@@ -57,8 +57,11 @@ but it is not reliable for factuality, instruction following, safety, math, or c
 
 Use `--stop-after-data-epoch=1` in `scripts.base_train`. It saves and stops as
 soon as the dataloader completes the first full pass over the sorted train parquets,
-before training on epoch 2 data. Keep `--num-iterations=46000` as the LR schedule
-and safety ceiling unless intentionally retuning the schedule.
+before training on epoch 2 data. Set `--num-iterations=27529` for this dataset
+layout so the final epoch-1 batch is trained and the LR schedule is annealed at
+the first epoch boundary. The old
+`--num-iterations=46000` schedule reached the epoch boundary around `lrm=0.64`,
+which left the exported base under-annealed.
 
 For a balanced multilingual/general model, rebuild the pretraining data with
 `LAYOUT=interleaved`. For a Darija-ending curriculum, keep `LAYOUT=curriculum`.

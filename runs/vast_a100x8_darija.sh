@@ -119,19 +119,27 @@ python -m nanochat.report reset
 # Window pattern: L (full context) — SDPA has no efficient sliding window support.
 #
 # Data: stop-after-data-epoch=1 saves as soon as the sorted parquet curriculum
-# wraps to epoch 2. num-iterations=46000 remains a safety ceiling and LR schedule.
+# wraps to epoch 2 by default. BASE_STEPS must match that first-epoch length so
+# the final checkpoint is actually annealed. The old 46k horizon stopped around
+# 27k with lrm ~0.65, which produced a fluent but brittle base for SFT.
+# To intentionally train the full 46k horizon, set:
+#   BASE_STEPS=46000 STOP_AFTER_DATA_EPOCH=-1
 
 DEPTH="${DEPTH:-10}"
+BASE_STEPS="${BASE_STEPS:-27529}"
+STOP_AFTER_DATA_EPOCH="${STOP_AFTER_DATA_EPOCH:-1}"
+MODEL_TAG="${MODEL_TAG:-d${DEPTH}_darija_a100_annealed}"
+RUN_NAME="${RUN_NAME:-$MODEL_TAG}"
 
 torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \
     --depth="$DEPTH" \
-    --model-tag="d${DEPTH}_darija_a100" \
-    --run="d${DEPTH}_darija_a100" \
+    --model-tag="$MODEL_TAG" \
+    --run="$RUN_NAME" \
     --max-seq-len=1024 \
     --device-batch-size=64 \
     --total-batch-size=524288 \
-    --num-iterations=46000 \
-    --stop-after-data-epoch=1 \
+    --num-iterations="$BASE_STEPS" \
+    --stop-after-data-epoch="$STOP_AFTER_DATA_EPOCH" \
     --eval-every=1000 \
     --eval-tokens=524288 \
     --core-metric-every=500 \
@@ -142,6 +150,7 @@ torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \
 # -----------------------------------------------------------------------------
 # 4) base eval
 torchrun --standalone --nproc_per_node=8 -m scripts.base_eval -- \
+    --model-tag "$MODEL_TAG" \
     --device-batch-size=64
 
 # -----------------------------------------------------------------------------
@@ -154,7 +163,7 @@ ls -lh "$NANOCHAT_BASE_DIR"/base_checkpoints/ || true
 
 HF_MODEL_REPO="${HF_MODEL_REPO:-}"
 if [ -z "$HF_MODEL_REPO" ] && [ -n "${HF_USER:-}" ]; then
-    HF_MODEL_REPO="${HF_USER}/nanochat-d${DEPTH}-darija-a100-base"
+    HF_MODEL_REPO="${HF_USER}/${MODEL_TAG}-base"
 fi
 
 if [ -n "${HF_TOKEN:-}" ] && [ -n "$HF_MODEL_REPO" ]; then
@@ -166,12 +175,12 @@ if [ -n "${HF_TOKEN:-}" ] && [ -n "$HF_MODEL_REPO" ]; then
     fi
     python -m scripts.export_hf \
         --source base \
-        --model-tag "d${DEPTH}_darija_a100" \
-        --output-dir "$NANOCHAT_BASE_DIR/hf_exports/nanochat-d${DEPTH}-darija-a100-base" \
+        --model-tag "$MODEL_TAG" \
+        --output-dir "$NANOCHAT_BASE_DIR/hf_exports/$MODEL_TAG-base" \
         --dtype bfloat16 \
         --push-to-hub "$HF_MODEL_REPO" \
         "${HF_PRIVATE_ARGS[@]}" \
-        --commit-message "Export d${DEPTH} Darija A100 base checkpoint"
+        --commit-message "Export $MODEL_TAG base checkpoint"
 else
     echo "HF-compatible model upload skipped. Set HF_TOKEN and HF_MODEL_REPO (or HF_USER) to enable it."
 fi

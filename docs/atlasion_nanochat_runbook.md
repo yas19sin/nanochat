@@ -739,8 +739,8 @@ export HF_TOKEN="$HF_TOKEN"
 
 torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- \
   --model-source base \
-  --model-tag d10_darija_a100 \
-  --model-step 27000 \
+  --model-tag d10_darija_a100_annealed \
+  --model-step 27529 \
   --output-tag AtlasionNano-200M-Instruct-b64k-enqa-trans \
   --run AtlasionNano-200M-Instruct-b64k-enqa-trans \
   --task darija_chat \
