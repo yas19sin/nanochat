@@ -128,6 +128,8 @@ python -m nanochat.report reset
 DEPTH="${DEPTH:-10}"
 BASE_STEPS="${BASE_STEPS:-27529}"
 STOP_AFTER_DATA_EPOCH="${STOP_AFTER_DATA_EPOCH:-1}"
+PRETRAIN_DEVICE_BATCH_SIZE="${PRETRAIN_DEVICE_BATCH_SIZE:-64}"
+PRETRAIN_TOTAL_BATCH_SIZE="${PRETRAIN_TOTAL_BATCH_SIZE:-524288}"
 MODEL_TAG="${MODEL_TAG:-d${DEPTH}_darija_a100_annealed}"
 RUN_NAME="${RUN_NAME:-$MODEL_TAG}"
 
@@ -136,8 +138,8 @@ torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \
     --model-tag="$MODEL_TAG" \
     --run="$RUN_NAME" \
     --max-seq-len=1024 \
-    --device-batch-size=64 \
-    --total-batch-size=524288 \
+    --device-batch-size="$PRETRAIN_DEVICE_BATCH_SIZE" \
+    --total-batch-size="$PRETRAIN_TOTAL_BATCH_SIZE" \
     --num-iterations="$BASE_STEPS" \
     --stop-after-data-epoch="$STOP_AFTER_DATA_EPOCH" \
     --eval-every=1000 \
