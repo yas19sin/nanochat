@@ -1,7 +1,25 @@
 try:
     from .configuration_nanochat import NanochatConfig
 except ImportError:
-    from configuration_nanochat import NanochatConfig
+    try:
+        from configuration_nanochat import NanochatConfig
+    except ImportError:
+        # Handle case where loaded from transformers cache with custom module loading
+        import sys
+        import importlib.util
+        from pathlib import Path
+        
+        cache_dir = Path(__file__).parent
+        config_file = cache_dir / "configuration_nanochat.py"
+        if config_file.exists():
+            spec = importlib.util.spec_from_file_location("configuration_nanochat", config_file)
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                sys.modules["configuration_nanochat"] = mod
+                spec.loader.exec_module(mod)
+                NanochatConfig = mod.NanochatConfig
+        else:
+            raise ImportError("Could not locate configuration_nanochat module")
 
 
 class AtlasionNanoConfig(NanochatConfig):
