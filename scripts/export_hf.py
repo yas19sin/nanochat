@@ -365,6 +365,9 @@ def build_model_config(meta_data: dict, bos_token_id: int, eos_token_id: int | N
 
     model_config_kwargs = dict(meta_data["model_config"])
     _patch_missing_config_keys(model_config_kwargs)
+    model_config_kwargs.setdefault("pad_vocab_size_to", 64)
+    model_config_kwargs.setdefault("ve_gate_channels", 12)
+    model_config_kwargs.setdefault("smear_gate_channels", 24)
     config = AtlasionNanoConfig(
         **model_config_kwargs,
         bos_token_id=bos_token_id,
