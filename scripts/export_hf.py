@@ -8,8 +8,9 @@ from pathlib import Path
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig, PreTrainedTokenizerFast
 from transformers.integrations.tiktoken import convert_tiktoken_to_fast
+from nanochat.configuration_atlasion_nano import AtlasionNanoConfig
+from nanochat.modeling_atlasion_nano import AtlasionNanoForCausalLM
 from nanochat.configuration_nanochat import NanochatConfig
-from nanochat.modeling_nanochat import NanochatForCausalLM
 
 SPECIAL_TOKENS = [
     "<|bos|>",
@@ -130,6 +131,10 @@ def export_tokenizer(tokenizer_dir: Path, output_dir: Path, bos_token: str, eos_
 
 def copy_remote_code(output_dir: Path) -> None:
     package_dir = Path(__file__).resolve().parents[1] / "nanochat"
+    shutil.copyfile(package_dir / "configuration_atlasion_nano.py",
+                    output_dir / "configuration_atlasion_nano.py")
+    shutil.copyfile(package_dir / "modeling_atlasion_nano.py",
+                    output_dir / "modeling_atlasion_nano.py")
     shutil.copyfile(package_dir / "configuration_nanochat.py",
                     output_dir / "configuration_nanochat.py")
     shutil.copyfile(package_dir / "modeling_nanochat.py",
@@ -341,10 +346,11 @@ model = AutoModelForCausalLM.from_pretrained(
 ## Files
 
 - `model.safetensors`: model weights
-- `config.json`: NanoChat architecture config
+- `config.json`: AtlasionNano architecture config
 - `generation_config.json`: default sampling config
 - `tokenizer.json`, `tokenizer_config.json`, `special_tokens_map.json`: tokenizer files
-- `configuration_nanochat.py`, `modeling_nanochat.py`: custom Transformers code
+- `configuration_atlasion_nano.py`, `modeling_atlasion_nano.py`: custom Transformers entrypoints
+- `configuration_nanochat.py`, `modeling_nanochat.py`: underlying NanoChat implementation
 - `nanochat_export.json`: source checkpoint metadata
 
 ## Limitations
@@ -354,21 +360,21 @@ Expect fluent-looking but wrong answers, repetition on some prompts, and brittle
     (output_dir / "README.md").write_text(readme, encoding="utf-8")
 
 
-def build_model_config(meta_data: dict, bos_token_id: int, eos_token_id: int | None, pad_token_id: int) -> NanochatConfig:
+def build_model_config(meta_data: dict, bos_token_id: int, eos_token_id: int | None, pad_token_id: int) -> AtlasionNanoConfig:
     from nanochat.checkpoint_manager import _patch_missing_config_keys
 
     model_config_kwargs = dict(meta_data["model_config"])
     _patch_missing_config_keys(model_config_kwargs)
-    config = NanochatConfig(
+    config = AtlasionNanoConfig(
         **model_config_kwargs,
         bos_token_id=bos_token_id,
         eos_token_id=eos_token_id,
         pad_token_id=pad_token_id,
         auto_map={
-            "AutoConfig": "configuration_nanochat.NanochatConfig",
-            "AutoModelForCausalLM": "modeling_nanochat.NanochatForCausalLM",
+            "AutoConfig": "configuration_atlasion_nano.AtlasionNanoConfig",
+            "AutoModelForCausalLM": "modeling_atlasion_nano.AtlasionNanoForCausalLM",
         },
-        architectures=["NanochatForCausalLM"],
+        architectures=["AtlasionNanoForCausalLM"],
     )
     return config
 
@@ -450,7 +456,7 @@ def export_checkpoint(
     config = build_model_config(
         meta_data, bos_token_id, eos_token_id, pad_token_id)
     config.use_cache = False
-    model = NanochatForCausalLM(config)
+    model = AtlasionNanoForCausalLM(config)
 
     source_dtype = model_data["transformer.wte.weight"].dtype
     if dtype != "auto":
