@@ -14,28 +14,7 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutput,
 )
 
-try:
-    from .configuration_nanochat import NanochatConfig
-except ImportError:
-    try:
-        from configuration_nanochat import NanochatConfig
-    except ImportError:
-        # Handle case where loaded from transformers cache with custom module loading
-        import sys
-        import importlib.util
-        from pathlib import Path
-        
-        cache_dir = Path(__file__).parent
-        config_file = cache_dir / "configuration_nanochat.py"
-        if config_file.exists():
-            spec = importlib.util.spec_from_file_location("configuration_nanochat", config_file)
-            if spec and spec.loader:
-                mod = importlib.util.module_from_spec(spec)
-                sys.modules["configuration_nanochat"] = mod
-                spec.loader.exec_module(mod)
-                NanochatConfig = mod.NanochatConfig
-        else:
-            raise ImportError("Could not locate configuration_nanochat module")
+from .configuration_nanochat import NanochatConfig
 
 
 def norm(x: torch.Tensor) -> torch.Tensor:
@@ -370,7 +349,8 @@ class NanochatModel(NanochatPreTrainedModel):
                 self.smear_gate(hidden_states[:, 1:, :channels])
             )
             hidden_states = torch.cat(
-                [hidden_states[:, :1], hidden_states[:, 1:] + gate * hidden_states[:, :-1]],
+                [hidden_states[:, :1], hidden_states[:, 1:] +
+                    gate * hidden_states[:, :-1]],
                 dim=1,
             )
         x0 = hidden_states
@@ -403,7 +383,8 @@ class NanochatModel(NanochatPreTrainedModel):
                 x_backout = hidden_states
 
         if x_backout is not None:
-            hidden_states = hidden_states - self.backout_lambda.to(hidden_states.dtype) * x_backout
+            hidden_states = hidden_states - \
+                self.backout_lambda.to(hidden_states.dtype) * x_backout
         hidden_states = norm(hidden_states)
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
@@ -539,7 +520,8 @@ def _pool_hidden_states(hidden_states, attention_mask=None, mode="last"):
     mask = attention_mask.to(device=hidden_states.device, dtype=torch.long)
     if mode == "last":
         lengths = mask.sum(dim=1).clamp(min=1) - 1
-        batch = torch.arange(hidden_states.size(0), device=hidden_states.device)
+        batch = torch.arange(hidden_states.size(
+            0), device=hidden_states.device)
         return hidden_states[batch, lengths]
     weights = mask.to(dtype=hidden_states.dtype).unsqueeze(-1)
     return (hidden_states * weights).sum(dim=1) / weights.sum(dim=1).clamp(min=1)
@@ -600,7 +582,8 @@ class NanochatForTextEmbedding(NanochatPreTrainedModel):
         super().__init__(config)
         self.model = NanochatModel(config)
         self.pooling = getattr(config, "embedding_pooling", "mean")
-        self.normalize_embeddings = getattr(config, "normalize_embeddings", True)
+        self.normalize_embeddings = getattr(
+            config, "normalize_embeddings", True)
         projection_dim = int(getattr(config, "projection_dim", 0) or 0)
         self.projection = (
             nn.Linear(config.n_embd, projection_dim, bias=False)
